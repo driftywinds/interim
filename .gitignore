@@ -20,6 +20,7 @@ session_secret
 .env
 .env.*
 !.env.example
+!.env.sss3.example
 
 # Build output
 /bin/

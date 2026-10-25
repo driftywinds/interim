@@ -1,0 +1,59 @@
+# sss3 + Caddy CORS proxy.
+#
+# The old sss3-only container must be stopped first. This stack reuses ./data.
+# Caddy publishes host port 5553, so the existing Cloudflare Tunnel target
+# http://localhost:5553 keeps working and now hits Caddy instead of sss3.
+#
+#   cp .env.sss3.example .env.sss3
+#   # edit INTERIM_ORIGIN and sss3 credentials
+#   docker compose -f compose.sss3.yaml --env-file .env.sss3 up -d
+
+name: sss3
+
+services:
+  stupid-simple-s3:
+    image: ghcr.io/espebra/stupid-simple-s3:latest
+    container_name: stupid-simple-s3
+    restart: unless-stopped
+    environment:
+      STUPID_RW_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env.sss3}
+      STUPID_RW_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env.sss3}
+      STUPID_BUCKET_NAME: ${S3_BUCKET:-interim}
+      STUPID_LOG_LEVEL: ${SSS3_LOG_LEVEL:-info}
+    volumes:
+      - ./data:/var/lib/stupid-simple-s3
+    networks:
+      - sss3
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: sss3-cors
+    restart: unless-stopped
+    depends_on:
+      - stupid-simple-s3
+    environment:
+      # Must exactly match the origin serving the interim web UI.
+      INTERIM_ORIGIN: ${INTERIM_ORIGIN:?set INTERIM_ORIGIN in .env.sss3}
+    ports:
+      # Existing Cloudflare Tunnel target. Caddy now listens here.
+      - "127.0.0.1:5553:8080"
+    volumes:
+      - ./Caddyfile.sss3:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - sss3
+
+volumes:
+  caddy-data:
+  caddy-config:
+
+networks:
+  sss3:
+    driver: bridge

@@ -1,0 +1,36 @@
+# CORS proxy for stupid-simple-s3.
+#
+# Cloudflare Tunnel should point sss3.drifty.win at this listener:
+#   http://localhost:5553
+#
+# The container listens on :8080; compose publishes it as 5553 on the host.
+#
+# SigV4 signs the Host header. reverse_proxy preserves the incoming public Host
+# so sss3 sees "sss3.drifty.win" even though Cloudflare connects to localhost.
+
+:8080 {
+	@options method OPTIONS
+	handle @options {
+		header {
+			Access-Control-Allow-Origin "{$INTERIM_ORIGIN}"
+			Access-Control-Allow-Methods "PUT, GET, HEAD, DELETE, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type, Content-Disposition"
+			Access-Control-Max-Age "86400"
+			Vary "Origin"
+		}
+		respond 204
+	}
+
+	handle {
+		header {
+			Access-Control-Allow-Origin "{$INTERIM_ORIGIN}"
+			Access-Control-Expose-Headers "ETag, Content-Length, Content-Disposition"
+			Vary "Origin"
+		}
+
+		reverse_proxy stupid-simple-s3:5553 {
+			# Required: do not let Caddy replace the host with the container name.
+			header_up Host {http.request.host}
+		}
+	}
+}

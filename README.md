@@ -46,6 +46,74 @@ The SQLite database, generated session secret, and WAL files live in the
 `interim-data` volume at `/data`. Back up the volume, not individual files
 while the container is running.
 
+### sss3 + Caddy CORS proxy
+
+For an sss3-only deployment, the repository includes:
+
+- [compose.sss3.yaml](compose.sss3.yaml)
+- [Caddyfile.sss3](Caddyfile.sss3)
+- [.env.sss3.example](.env.sss3.example)
+
+```sh
+cp .env.sss3.example .env.sss3
+# edit INTERIM_ORIGIN, S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET
+docker compose -f compose.sss3.yaml --env-file .env.sss3 up -d
+```
+
+Stop the old sss3-only compose first. The new stack reuses `./data` and
+publishes Caddy on host port `5553`, so an existing Cloudflare Tunnel for
+`sss3.drifty.win` → `http://localhost:5553` keeps working — it now reaches
+Caddy instead of sss3 directly.
+
+Caddy:
+
+- answers `OPTIONS` with `204` and the CORS headers;
+- allows the exact `INTERIM_ORIGIN` (the interim web origin);
+- exposes `ETag`, `Content-Length`, and `Content-Disposition`;
+- forwards all other requests to sss3 while preserving the public `Host`
+  header that SigV4 signs.
+
+A typical Cloudflare Tunnel ingress while running cloudflared on the host:
+
+```yaml
+tunnel: YOUR_TUNNEL_ID
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_ID.json
+ingress:
+  - hostname: sss3.drifty.win
+    service: http://localhost:5553
+    originRequest:
+      httpHostHeader: sss3.drifty.win
+  - service: http_status:404
+```
+
+If cloudflared runs as a container on the same Docker network, use
+`service: http://sss3-cors:8080` instead. The explicit public
+`httpHostHeader` is important; a rewritten `Host` breaks SigV4.
+
+The interim service should use:
+
+```dotenv
+S3_ENDPOINT=https://sss3.drifty.win
+S3_PUBLIC_ENDPOINT=https://sss3.drifty.win
+S3_REGION=us-east-1
+S3_BUCKET=interim
+S3_FORCE_PATH_STYLE=true
+```
+
+If interim is placed on the same Docker network as this stack, it can use
+`S3_ENDPOINT=http://stupid-simple-s3:5553` for server-side calls while keeping
+`S3_PUBLIC_ENDPOINT=https://sss3.drifty.win` for browser presigned URLs.
+
+Cloudflare notes for this setup:
+
+- Free/Pro Cloudflare caps proxied request bodies around 100 MB. Keep interim’s
+  `MAX_FILE_SIZE` below that, or bypass Cloudflare for the S3 hostname.
+- Add a Cache Rule bypass for the S3 hostname.
+- Browser Integrity Check / Bot Fight Mode can reject scripted presigned PUTs
+  with error `1010`; browser uploads are unaffected. Exempt the S3 hostname if
+  curl/API clients must upload directly.
+- Rotate the sss3 credentials before deployment.
+
 ## Configuration
 
 All runtime configuration is read from the environment. `.env` is loaded
