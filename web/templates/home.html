@@ -1,9 +1,12 @@
 {{define "page"}}
-<p class="lede">interim is a fast, minimal temporary file host. Upload anonymously or bring your own user hash.</p>
+<p class="lede">interim is a fast, minimal temporary file host. Upload anonymously or use the API</p>
 
 <div class="expiry-notice" role="note">
     <strong>Every file is permanently deleted after {{.RetentionLabel}}.</strong>
-    There are no extensions and no recovery. Download what you need before the deadline.
+    <p class="storage-donate">
+        Want to support development and increase this limit?
+        <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
+    </p>
 </div>
 
 <div id="storage-full" class="warn" role="alert"{{if .Status.Accepting}} hidden{{end}}>
@@ -73,11 +76,10 @@
 <section class="features">
     <h2>Our main features include</h2>
     <ul>
-        <li>No account needed. Uploads are public and anonymous by default.</li>
-        <li>A hard expiry period of {{.RetentionLabel}}. No permanent storage.</li>
-        <li>Private S3 bucket, signed download links, no hotlinking.</li>
-        <li>A strict storage cap so the server never oversubscribes.</li>
-        <li>Per-browser upload history with local delete tokens.</li>
+        <li>No account needed</li>
+        <li>Expiry period of {{.RetentionLabel}}</li>
+        <li>A strict storage cap (Please donate if you want more storage and retention time)</li>
+        <li>Basic upload history and deletion</li>
     </ul>
 </section>
 {{end}}

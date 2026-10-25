@@ -272,6 +272,13 @@ legend {
     margin-bottom: 2px;
 }
 
+.expiry-notice .storage-donate {
+    margin: 8px 0 0;
+    padding: 0;
+    border-left: 0;
+    background: transparent;
+}
+
 .upload-zone {
     border: 1px dashed var(--border);
     border-radius: 3px;
