@@ -1,11 +1,12 @@
 {{define "page"}}
 <div class="api-docs">
-    <p class="lede">Tools to interact with interim programmatically. The API is versioned, JSON-first, and available at <code>{{.APIBase}}</code>.</p>
-    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. Storage is capped at {{.MaxStorage}}; uploads are rejected with HTTP 507 when full.</p>
+    <p class="lede">Tools to interact with interim programmatically. Uploads go directly from your client to the signed S3 endpoint; interim only signs and records metadata.</p>
+    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full. This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.</p>
 
     <nav class="docs-toc" aria-label="API sections">
         <a href="#overview">Overview</a>
         <a href="#authentication">Authentication</a>
+        <a href="#direct-upload">Direct upload</a>
         <a href="#quickstart">Quickstart</a>
         <a href="#endpoints">Endpoints</a>
         <a href="#errors">Errors</a>
@@ -15,37 +16,75 @@
 
     <h2 id="overview">Overview</h2>
     <p><strong>Base URL:</strong> <code>{{.APIBase}}</code></p>
-    <p>Uploads are multipart/form-data requests. Anonymous uploads are allowed. A user hash identifies an API client and lets it list and delete its own files. Every response is JSON, except <code>DELETE</code>, which returns <code>204 No Content</code>.</p>
-    <p><strong>Retention:</strong> {{.RetentionLabel}} per file, configured by this instance's operator. <strong>Per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed URL lifetime:</strong> {{.DownloadTTL}}.</p>
+    <p><strong>Retention:</strong> {{.RetentionLabel}} per file. <strong>Per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed download lifetime:</strong> {{.DownloadTTL}}.</p>
+    <p>Every upload follows the same three steps:</p>
+    <ol>
+        <li><code>POST /uploads</code> creates an upload intent, reserves storage, and returns a short-lived presigned PUT URL.</li>
+        <li>Your client <code>PUT</code>s the raw bytes to that URL. No file bytes pass through interim.</li>
+        <li><code>POST /uploads/{id}/complete</code> verifies the object in storage and creates the public file record.</li>
+    </ol>
+    <p>A pending upload can be canceled with <code>DELETE /uploads/{id}</code>. Unclaimed intents and their temporary objects are removed by a janitor after the upload window expires.</p>
 
     <h2 id="authentication">Authentication</h2>
-    <p>Create a user hash with <code>POST /keys</code>. It is returned once. Send it on every authenticated request:</p>
+    <p>Create a user hash with <code>POST /keys</code>. It is returned once and can be sent as a bearer credential:</p>
     <pre><code>Authorization: Bearer interim_...</code></pre>
-    <p><code>X-API-Key: interim_...</code> is also accepted. Anonymous upload and public metadata/download endpoints do not require a hash. An invalid supplied hash is always rejected.</p>
-    <p><strong>Lost hashes cannot be recovered.</strong> Only a SHA-256 hash is stored on the server.</p>
+    <p><code>X-API-Key: interim_...</code> is also accepted. Creating an upload intent is the only upload step that uses this credential; completion and abort use the separate one-time <code>upload_token</code> returned by the intent.</p>
+    <p><strong>Lost user hashes cannot be recovered.</strong> Only a SHA-256 hash is stored on the server.</p>
+
+    <h2 id="direct-upload">Direct upload contract</h2>
+    <p>The create response contains:</p>
+    <pre><code>{
+  "upload_id": "…",
+  "url": "https://storage.example/…signature…",
+  "method": "PUT",
+  "headers": {
+    "Content-Type": "application/pdf",
+    "Content-Disposition": "attachment; filename=…"
+  },
+  "expires_at": "2026-10-25T09:30:00Z",
+  "intent_expires_at": "2026-10-25T09:45:00Z",
+  "upload_token": "…",
+  "complete_url": "{{.APIBase}}/uploads/…/complete",
+  "abort_url": "{{.APIBase}}/uploads/…",
+  "delete_token": "…"
+}</code></pre>
+    <p>Send the bytes with exactly the returned method, URL, and headers. Do not send a multipart form to the S3 URL. The S3 bucket must allow CORS for your web origin, including the <code>Content-Type</code> and <code>Content-Disposition</code> request headers.</p>
+    <p>After the PUT succeeds, call <code>complete_url</code> with <code>X-Upload-Token: &lt;upload_token&gt;</code>. The server does a <code>HEAD</code> and accepts the object only when its real size is greater than zero and no larger than the declared size and the configured file cap.</p>
+    <p><strong>Save <code>delete_token</code>.</strong> Anonymous uploads can only be deleted with it. The complete response returns the file record and page URL, not the delete token again.</p>
 
     <h2 id="quickstart">Quickstart</h2>
     <h3>1. Create a user hash</h3>
     <pre><code>curl -X POST {{.BaseURL}}/api/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"my-cli"}'</code></pre>
-    <h3>2. Upload a file</h3>
-    <pre><code>curl -X POST {{.BaseURL}}/api/v1/files \
+
+    <h3>2. Create an upload intent</h3>
+    <pre><code>curl -X POST {{.BaseURL}}/api/v1/uploads \
   -H 'Authorization: Bearer interim_...' \
-  -H 'X-File-Size: 12345' \
-  -F 'file=@sample.bin'</code></pre>
-    <p>The response includes <code>id</code>, <code>page_url</code>, <code>expires_at</code>, and a one-time <code>delete_token</code>. Keep the delete token if you uploaded anonymously.</p>
+  -H 'Content-Type: application/json' \
+  -d '{"name":"sample.bin","size":12345,"content_type":"application/octet-stream"}'</code></pre>
 
-    <h3>3. Ask for a signed download link</h3>
+    <h3>3. PUT the bytes directly to S3</h3>
+    <pre><code>curl -X PUT "SIGNED_URL_FROM_RESPONSE" \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'Content-Disposition: attachment; filename=sample.bin' \
+  --data-binary @sample.bin</code></pre>
+
+    <h3>4. Complete the upload</h3>
+    <pre><code>curl -X POST "COMPLETE_URL_FROM_RESPONSE" \
+  -H 'X-Upload-Token: UPLOAD_TOKEN_FROM_RESPONSE'</code></pre>
+    <p>The response is <code>{"upload_id":"…","file":{…}}</code>. Use <code>file.page_url</code> for the public download page.</p>
+
+    <h3>5. Ask for a signed download link</h3>
     <pre><code>curl -X POST {{.BaseURL}}/api/v1/files/FILE_ID/download</code></pre>
-    <p>The returned <code>url</code> is a short-lived signed S3 URL. Do not store it; request a new one when needed.</p>
+    <p>The returned <code>url</code> is a short-lived signed S3 GET URL. Do not store it; request a new one when needed.</p>
 
-    <h3>4. Delete a file</h3>
+    <h3>6. Delete a file</h3>
     <pre><code>curl -X DELETE {{.BaseURL}}/api/v1/files/FILE_ID \
   -H 'Authorization: Bearer interim_...'</code></pre>
     <p>Anonymous uploads are deleted with the per-file token:</p>
     <pre><code>curl -X DELETE {{.BaseURL}}/api/v1/files/FILE_ID \
-  -H 'X-Delete-Token: THE_TOKEN_FROM_UPLOAD'</code></pre>
+  -H 'X-Delete-Token: DELETE_TOKEN_FROM_INTENT'</code></pre>
 
     <h2 id="endpoints">Endpoints</h2>
 
@@ -78,23 +117,43 @@ Authorization: Bearer interim_...</code></pre>
     </details>
 
     <details open>
-        <summary><strong>Upload a file</strong> <code>POST /files</code></summary>
+        <summary><strong>Create an upload intent</strong> <code>POST /uploads</code></summary>
         <div class="endpoint">
-            <p>Multipart field name: <code>file</code>. Authentication is optional. Send <code>X-File-Size</code> with the exact byte size; without it, a Content-Length request body is required.</p>
-            <pre><code>POST {{.APIBase}}/files
+            <p>Authentication optional. Reserves the declared size immediately and returns a presigned PUT URL. <code>size</code> is required and is the maximum the object may become; the server verifies after the PUT.</p>
+            <pre><code>POST {{.APIBase}}/uploads
 Authorization: Bearer interim_...      # optional
-X-File-Size: 12345                     # recommended
-Content-Type: multipart/form-data
+Content-Type: application/json
 
-file=@sample.bin</code></pre>
-            <p>Possible errors: <code>413 file_too_large</code>, <code>507 storage_full</code>, <code>502 storage_error</code>.</p>
+{"name":"sample.bin","size":12345,"content_type":"application/octet-stream"}</code></pre>
+            <p>Errors: <code>413 file_too_large</code>, <code>429 rate_limited</code>, <code>507 storage_full</code>. The signed PUT URL expires after {{.UploadURLTTL}}; the intent outlives it briefly so completion can still run.</p>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Complete an upload</strong> <code>POST /uploads/{id}/complete</code></summary>
+        <div class="endpoint">
+            <p>Requires <code>X-Upload-Token</code>. Verifies the object with a HEAD request, checks its actual size, consumes the quota reservation, and commits the file. This endpoint is idempotent: a retry of an already committed upload returns the existing file.</p>
+            <pre><code>POST {{.APIBase}}/uploads/UPLOAD_ID/complete
+X-Upload-Token: UPLOAD_TOKEN_FROM_INTENT</code></pre>
+            <pre><code>HTTP/1.1 201 Created
+{"upload_id":"…","file":{ … }}</code></pre>
+            <p><code>409 upload_missing</code> means the PUT has not reached storage yet; retry. <code>410 upload_expired</code> means the intent window ended and the temporary object was removed.</p>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Abort an upload</strong> <code>DELETE /uploads/{id}</code></summary>
+        <div class="endpoint">
+            <p>Requires <code>X-Upload-Token</code>. Deletes any object at the intent's key, releases its reservation, and closes the intent. Returns <code>204</code>; committed uploads return <code>409</code>.</p>
+            <pre><code>DELETE {{.APIBase}}/uploads/UPLOAD_ID
+X-Upload-Token: UPLOAD_TOKEN_FROM_INTENT</code></pre>
         </div>
     </details>
 
     <details open>
         <summary><strong>List your files</strong> <code>GET /files</code></summary>
         <div class="endpoint">
-            <p>Requires a bearer user hash. Returns only that hash's active files. Query: <code>limit</code> (1–100) and <code>offset</code>.</p>
+            <p>Requires a bearer user hash. Returns only that hash's active, committed files. Query: <code>limit</code> (1–100) and <code>offset</code>.</p>
             <pre><code>GET {{.APIBase}}/files?limit=50&amp;offset=0
 Authorization: Bearer interim_...</code></pre>
         </div>
@@ -129,7 +188,7 @@ Authorization: Bearer interim_...</code></pre>
             <pre><code>DELETE {{.APIBase}}/files/FILE_ID
 Authorization: Bearer interim_...
 # or
-X-Delete-Token: token_from_upload</code></pre>
+X-Delete-Token: token_from_intent</code></pre>
         </div>
     </details>
 
@@ -145,12 +204,13 @@ X-Delete-Token: token_from_upload</code></pre>
     <table class="fs">
         <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
         <tbody>
-        <tr><td>400</td><td><code>invalid_request</code></td><td>Malformed JSON, form, or upload.</td></tr>
-        <tr><td>401</td><td><code>unauthorized</code></td><td>Missing or invalid user hash.</td></tr>
-        <tr><td>403</td><td><code>forbidden</code></td><td>Invalid per-file delete token.</td></tr>
-        <tr><td>404</td><td><code>not_found</code></td><td>Unknown file or endpoint.</td></tr>
-        <tr><td>410</td><td><code>expired</code></td><td>The configured retention period has ended.</td></tr>
-        <tr><td>413</td><td><code>file_too_large</code></td><td>Exceeds the per-file cap.</td></tr>
+        <tr><td>400</td><td><code>invalid_request</code></td><td>Malformed JSON or upload intent.</td></tr>
+        <tr><td>401</td><td><code>unauthorized</code></td><td>Missing or invalid user hash / upload token.</td></tr>
+        <tr><td>403</td><td><code>forbidden</code></td><td>Invalid per-file delete or upload token.</td></tr>
+        <tr><td>404</td><td><code>not_found</code></td><td>Unknown file, upload, or endpoint.</td></tr>
+        <tr><td>409</td><td><code>upload_missing</code></td><td>PUT has not reached storage yet; retry completion.</td></tr>
+        <tr><td>410</td><td><code>expired</code> / <code>upload_expired</code></td><td>The file retention period or upload window has ended.</td></tr>
+        <tr><td>413</td><td><code>file_too_large</code></td><td>Declared or actual object exceeds the file cap.</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>Too many requests; check <code>Retry-After</code>.</td></tr>
         <tr><td>507</td><td><code>storage_full</code></td><td>No storage capacity available.</td></tr>
         </tbody>

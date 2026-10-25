@@ -63,7 +63,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	app.MaintenanceOnce(ctx)
+	app.StartupMaintenance(ctx)
 	go app.RunMaintenance(ctx)
 
 	httpServer := &http.Server{
@@ -81,6 +81,8 @@ func main() {
 			"listen", cfg.ListenAddr,
 			"storage_limit", cfg.MaxStorage,
 			"max_file_size", cfg.MaxFileSize,
+			"upload_url_ttl", cfg.UploadURLTTL.String(),
+			"upload_intent_ttl", cfg.UploadIntentTTL.String(),
 			"retention", cfg.Retention.String(),
 			"bucket", cfg.S3.Bucket,
 		)

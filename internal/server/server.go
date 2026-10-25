@@ -12,7 +12,6 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,14 +31,12 @@ import (
 )
 
 const (
-	adminCookie    = "interim_admin"
-	preauthCookie  = "interim_csrf"
-	maxReservation = 6 * time.Hour
+	adminCookie   = "interim_admin"
+	preauthCookie = "interim_csrf"
 )
 
 var (
 	errUnauthorized = errors.New("unauthorized")
-	uploadTooLarge  = errors.New("upload exceeds declared size")
 )
 
 type Server struct {
@@ -108,7 +105,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/status", s.handleAPIStatus)
 	mux.HandleFunc("POST /api/v1/keys", s.handleCreateKey)
 	mux.HandleFunc("GET /api/v1/keys/me", s.handleKeyInfo)
-	mux.HandleFunc("POST /api/v1/files", s.handleUpload)
+	mux.HandleFunc("POST /api/v1/uploads", s.handleCreateUpload)
+	mux.HandleFunc("POST /api/v1/uploads/{id}/complete", s.handleCompleteUpload)
+	mux.HandleFunc("DELETE /api/v1/uploads/{id}", s.handleAbortUpload)
 	mux.HandleFunc("GET /api/v1/files", s.handleListFiles)
 	mux.HandleFunc("GET /api/v1/files/{id}", s.handleFileMetadata)
 	mux.HandleFunc("POST /api/v1/files/{id}/download", s.handleAPIDownload)
@@ -393,18 +392,6 @@ func requestID() string {
 	return hex.EncodeToString(buf)
 }
 
-func parseContentType(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "application/octet-stream"
-	}
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
-		return "application/octet-stream"
-	}
-	return mediaType
-}
-
 func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg.TrustProxy {
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
@@ -424,25 +411,4 @@ func (s *Server) clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
-}
-
-func parsePositiveInt64(value string) (int64, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, false
-	}
-	var n int64
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int64(r-'0')
-		if n > 1<<53 {
-			return 0, false
-		}
-	}
-	if n <= 0 {
-		return 0, false
-	}
-	return n, true
 }

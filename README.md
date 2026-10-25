@@ -11,12 +11,17 @@ Docker as the primary deployment target.
 
 - Anonymous uploads with no account.
 - User hashes (`interim_…`) that act as bearer API keys.
+- Direct browser-to-S3 uploads through short-lived presigned PUT URLs. File
+  bytes never pass through the interim server.
 - Configurable retention via `RETENTION` (default `7d`), enforced by metadata
   and a background cleanup worker.
 - Private S3 bucket. No permanent object URLs; download links are presigned and
   expire after `DOWNLOAD_URL_TTL`.
 - Configurable per-file and total storage caps, enforced with atomic
   reservations so concurrent uploads cannot oversubscribe capacity.
+- A janitor that runs at startup and on intervals, deleting expired upload
+  intents, temporary objects, orphan S3 keys, terminal intent rows, and stale
+  reservations.
 - Per-browser upload history stored in `localStorage`, including a one-time
   delete token that is never exposed on the public download page.
 - API documentation at `/api` and OpenAPI 3.1 at `/api/openapi.json` /
@@ -65,10 +70,10 @@ automatically for local runs, and Compose uses it via `env_file`.
 | `S3_FORCE_PATH_STYLE` | no | `true` | Keep true for sss3/MinIO/Garage; false for AWS. |
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
-| `S3_PART_SIZE` | no | `16MB` | 5MB–5GB. |
-| `S3_UPLOAD_CONCURRENCY` | no | `3` | 1–16. |
+| `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT URL lifetime. 5m–2h. |
+| `UPLOAD_INTENT_TTL` | no | `45m` | Deadline for completion; must be at least `UPLOAD_URL_TTL`. Max 6h. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. |
-| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE`. |
+| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` or the 5 GB single-PUT limit. |
 | `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry. |
 | `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. |
 
@@ -88,13 +93,39 @@ S3_FORCE_PATH_STYLE=true
 S3_BUCKET=interim
 ```
 
-`S3_PUBLIC_ENDPOINT` matters: the uploader talks to the internal endpoint, but a
-presigned URL is signed for the host the browser will use. Both endpoints must
-point at the same bucket and credentials. If you do not expose S3 directly, put
-it behind a reverse proxy; do not rewrite the signed host/path.
+`S3_PUBLIC_ENDPOINT` matters: the server signs with the internal client but the
+browser uploads to the public host. Both endpoints must point at the same bucket
+and credentials. If you do not expose S3 directly, put it behind a reverse
+proxy; do not rewrite the signed host/path.
 
-The bucket should be private. interim sets `Content-Disposition: attachment` on
-uploaded objects and creates the signed URL itself.
+The bucket should be private. The browser receives a PUT URL scoped to one
+object key and a short expiry. interim sets `Content-Disposition: attachment`
+through the signed PUT headers and also adds a response override to signed GETs.
+
+### Required bucket CORS
+
+Direct uploads require CORS on the bucket. Allow the interim origin, the `PUT`
+method, and the headers included in the create-upload response:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://files.example.com"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["content-type", "content-disposition"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3000
+  }
+]
+```
+
+API-only clients such as curl do not need CORS, but do need a browser-reachable
+`S3_PUBLIC_ENDPOINT` and a provider that supports presigned PUT requests. If
+`PUBLIC_BASE_URL` is HTTPS, the public S3 endpoint must also be HTTPS to avoid
+mixed-content blocking. The app also calls `HeadObject` and `ListObjectsV2` for
+verification and the orphan janitor. If the provider does not support
+`ListObjectsV2`, the janitor logs the failure and still cleans known expired
+intents.
 
 ### Other provider notes
 
@@ -107,31 +138,63 @@ uploaded objects and creates the signed URL itself.
   (`us-west-004`), create the bucket in the B2 console.
 - **Wasabi:** path-style is safest, use the provider's region endpoint.
 
-## Capacity and retention
+## Capacity, uploads, and retention
 
-`MAX_STORAGE` is tracked in SQLite and enforced with a reservation row created
-before the request body is streamed to S3. Reservations prevent two concurrent
-uploads from both believing they fit. A successful upload converts its
-reservation into a committed file; failures release it. Stale reservations are
-cleared at startup and after six hours.
+`MAX_STORAGE` is tracked in SQLite. Creating an upload intent reserves the
+declared size before interim signs anything, so concurrent uploads cannot both
+believe they fit. The reservation is converted into a committed file only after
+the object is verified. The actual object size is checked with `HeadObject` at
+completion; a smaller object is accepted and a larger one is deleted.
 
 When committed storage plus reservations reaches `MAX_STORAGE`:
 
 - `/api/v1/status` reports `accepting_uploads: false`;
-- uploads return HTTP `507 storage_full`;
+- new upload intents return HTTP `507 storage_full`;
 - the home page disables upload controls and shows
   **“Storage maxed out — please try again later.”**
 
-`RETENTION` is read from the environment when the process starts. Each upload
-gets an expiry of `created_at + RETENTION`; changing the value applies to new
-uploads, not existing rows. Expired file pages return HTTP `410`,
+`RETENTION` is read from the environment when the process starts. Each committed
+file gets an expiry of `completed_at + RETENTION`; changing the value applies to
+new uploads, not existing rows. Expired file pages return HTTP `410`,
 metadata/download endpoints refuse them, and a worker deletes the S3 object
 before removing the SQLite row.
 
-For belt-and-braces protection, configure your bucket lifecycle to expire
-objects under the configured prefix after the same period and to abort
-incomplete multipart uploads after one day. The application still enforces
-expiry on its own.
+### Upload intents and the janitor
+
+Every direct upload creates an `upload_intents` row with state `pending`. The
+browser gets a presigned PUT URL and a one-time upload token. Completion performs
+`HeadObject`, verifies the size, consumes the reservation, and inserts the file
+row in one SQLite transaction.
+
+Abandoned or failed uploads are cleaned by a janitor:
+
+- fast pass every minute: expired pending intents, expired files, expired
+  sessions, expired reservations, terminal intent rows older than 24 hours;
+- security pass at startup and every 30 minutes: list the configured S3 prefix
+  and delete objects with no matching file row or live pending intent;
+- at startup it runs before the HTTP listener, so old state is reconciled before
+  accepting requests;
+- during runtime, unknown objects get a 15-minute grace period to avoid racing a
+  just-completed PUT. At startup no browser upload can be in flight, so unknown
+  objects are removed immediately;
+- browser cancellation calls the abort endpoint, which deletes the object and
+  releases the reservation immediately;
+- if completion reports an oversized or empty object, the object is deleted and
+  the reservation released.
+
+The upload token is separate from the file delete token. Both are stored only as
+SHA-256 hashes. A completion retry for an already-committed intent returns the
+existing file instead of duplicating it.
+
+Because a presigned PUT cannot enforce a content-length condition at the storage
+layer, a client can temporarily upload more than it declared. Completion checks
+the real object size and deletes anything that exceeds the declared size or
+`MAX_FILE_SIZE`. Keep `UPLOAD_URL_TTL` short and use a bucket lifecycle rule if
+temporary cost exposure is a concern.
+
+For extra safety, configure a bucket lifecycle rule for the configured prefix.
+The application does not require it, but it limits cost if the server is offline
+longer than its upload window.
 
 ## API
 
@@ -144,11 +207,21 @@ curl -X POST https://files.example.com/api/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"cli"}'
 
-# Upload
-curl -X POST https://files.example.com/api/v1/files \
+# Create an upload intent
+curl -X POST https://files.example.com/api/v1/uploads \
   -H 'Authorization: Bearer interim_...' \
-  -H 'X-File-Size: 12345' \
-  -F 'file=@sample.bin'
+  -H 'Content-Type: application/json' \
+  -d '{"name":"sample.bin","size":12345,"content_type":"application/octet-stream"}'
+
+# PUT the file bytes directly to the signed URL from that response
+curl -X PUT 'SIGNED_S3_URL' \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'Content-Disposition: attachment; filename=sample.bin' \
+  --data-binary @sample.bin
+
+# Verify and commit it
+curl -X POST 'COMPLETE_URL' \
+  -H 'X-Upload-Token: UPLOAD_TOKEN'
 
 # Get a signed download URL (expires after DOWNLOAD_URL_TTL)
 curl -X POST https://files.example.com/api/v1/files/FILE_ID/download
@@ -158,9 +231,10 @@ curl -X DELETE https://files.example.com/api/v1/files/FILE_ID \
   -H 'Authorization: Bearer interim_...'
 ```
 
-Anonymous uploads receive a one-time `delete_token`; use
-`X-Delete-Token: <token>` with `DELETE` to remove them. Raw user hashes and
-delete tokens are stored only as SHA-256 hashes.
+Upload intents return a one-time `delete_token`; use
+`X-Delete-Token: <token>` with `DELETE /api/v1/files/{id}` to remove anonymous
+files. Raw user hashes, upload tokens, and delete tokens are stored only as
+SHA-256 hashes.
 
 ### Endpoints
 
@@ -168,26 +242,34 @@ delete tokens are stored only as SHA-256 hashes.
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/keys` | no | Create user hash. |
 | `GET` | `/api/v1/keys/me` | bearer | Key prefix and usage. |
-| `POST` | `/api/v1/files` | optional | Multipart upload. |
+| `POST` | `/api/v1/uploads` | optional | Reserve quota and sign a PUT URL. |
+| `POST` | `/api/v1/uploads/{id}/complete` | upload token | Verify and commit the object. |
+| `DELETE` | `/api/v1/uploads/{id}` | upload token | Abort a pending upload and release quota. |
 | `GET` | `/api/v1/files` | bearer | List the caller's active files. |
 | `GET` | `/api/v1/files/{id}` | no | Public metadata. |
 | `POST` | `/api/v1/files/{id}/download` | no | Short-lived signed URL. |
 | `DELETE` | `/api/v1/files/{id}` | bearer or token | Delete. |
 | `GET` | `/api/v1/status` | no | Capacity and retention status. |
 
-Rate limits apply to user-hash creation, download-link creation, and admin
-login. Errors use `{"error":{"code","message","request_id"}}`.
+Rate limits apply to user-hash creation, upload-intent creation, download-link
+creation, and admin login. Errors use
+`{"error":{"code","message","request_id"}}`.
 
 ## Web UI and browser history
 
-The home page stores completed uploads in `localStorage` under
-`interim.uploads.v1`, including the one-time delete token. Only that browser can
-see the list. Clearing site data loses the local delete ability, but the file
-still expires after the configured `RETENTION` period and the admin can delete it.
+The home page creates an upload intent, PUTs the selected file directly to S3
+with XHR for progress, then calls the completion endpoint. Canceling aborts the
+intent. Upload URLs are short-lived, so a slow upload can fail before completion;
+the UI reports that and tells the user to try again.
+
+Completed uploads are stored in `localStorage` under `interim.uploads.v1`,
+including the one-time delete token. Only that browser can see the list.
+Clearing site data loses the local delete ability, but the file still expires
+after the configured `RETENTION` period and the admin can delete it.
 
 The download page never receives or displays the delete token. Its download
-button POSTs to the server, which creates a fresh presigned URL and redirects
-to it. Direct object URLs do not exist in the HTML.
+button links to a server endpoint that creates a fresh presigned GET and
+redirects to it. Direct object URLs do not exist in the HTML.
 
 ## Admin
 
@@ -214,8 +296,10 @@ go run ./cmd/interim
 ```
 
 The test suite uses an in-memory fake object store and covers setup, auth,
-upload, signed download generation, ownership, quota rejection, expiry cleanup,
-and admin deletion. S3 integration itself must be tested against your provider.
+upload-intent creation, idempotent completion, direct upload verification,
+ownership, quota rejection, abort, janitor expiry, orphan sweeping, expiry
+cleanup, and admin deletion. S3 integration, CORS, and presigned PUT behaviour
+must be tested against your provider.
 
 Build the binary directly:
 
@@ -228,21 +312,30 @@ CGO_ENABLED=0 go build -trimpath -o bin/interim ./cmd/interim
 - Put interim behind a TLS-terminating reverse proxy and set
   `PUBLIC_BASE_URL` to the HTTPS origin. Set `TRUST_PROXY=true` only when the
   proxy is trusted; it is needed for correct client-IP rate limiting.
-- Run one instance per SQLite database. The storage reservation logic is safe
-  for a single process; SQLite is not a multi-writer cluster database.
+- The S3 bucket must be browser-reachable at `S3_PUBLIC_ENDPOINT`, with the CORS
+  policy shown above. The bucket itself stays private; only signed PUT/GET URLs
+  are exposed.
+- Run one instance per SQLite database. The reservation and intent state
+  machines rely on SQLite's single-writer behaviour.
+- Use a dedicated `S3_OBJECT_PREFIX`. The janitor treats objects under that
+  prefix as interim-owned and deletes ones with no matching file or live intent.
 - Keep the bucket private. Do not enable public ACLs or public bucket policies.
 - The Docker example uses a read-only root filesystem, a writable `/data`
   volume, and a non-root user.
 - Back up the `/data` volume. Only S3 holds file bytes; SQLite holds the mapping,
-  expiry, delete-token hashes, sessions, quotas, and admin credentials.
+  expiry, delete-token hashes, sessions, quotas, upload intents, and admin
+  credentials.
 
 ## Security model
 
 - File URLs are unguessable random IDs and public metadata reveals no object
   key.
+- Direct uploads are scoped to one object key and expire quickly; upload tokens
+  are one-time and never placed in URLs.
 - Download links are short-lived signed S3 GETs; objects are private.
-- User hashes and delete tokens are hashed at rest.
-- Uploads are capped and capacity-reserved before streaming.
+- User hashes, upload tokens, and delete tokens are hashed at rest.
+- Uploads are capped and capacity-reserved before signing. Actual object size is
+  verified with `HeadObject` before a file is committed.
 - Admin cookies are HttpOnly, SameSite=Lax, Secure when configured, and backed
   by DB sessions with per-session CSRF tokens.
 - Responses set a restrictive CSP, `nosniff`, frame denial, and

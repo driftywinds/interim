@@ -10,8 +10,7 @@ import (
 )
 
 var (
-	ErrReservationMissing  = errors.New("upload reservation is missing or expired")
-	ErrReservationTooSmall = errors.New("uploaded data exceeds the reserved space")
+	ErrReservationMissing = errors.New("upload reservation is missing or expired")
 )
 
 const fileColumns = `f.id, f.object_key, f.api_key_id, f.original_name, f.content_type,
@@ -78,48 +77,6 @@ func (s *Store) ClearExpiredReservations(ctx context.Context, now time.Time) (in
 		return 0, fmt.Errorf("clear expired reservations: %w", err)
 	}
 	return result.RowsAffected()
-}
-
-// CreateFileWithReservation commits an uploaded file and consumes its
-// reservation in one transaction.
-func (s *Store) CreateFileWithReservation(ctx context.Context, file File, reservationID string, reservedBytes int64) error {
-	if file.Size > reservedBytes {
-		return ErrReservationTooSmall
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin file commit: %w", err)
-	}
-	defer tx.Rollback()
-
-	result, err := tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", reservationID)
-	if err != nil {
-		return fmt.Errorf("consume storage reservation: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("consume storage reservation rows: %w", err)
-	}
-	if affected != 1 {
-		return ErrReservationMissing
-	}
-
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO files
-		 (id, object_key, api_key_id, original_name, content_type, size, delete_token_hash, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		file.ID, file.ObjectKey, file.APIKeyID, file.OriginalName, file.ContentType,
-		file.Size, file.DeleteTokenHash, toUnix(file.CreatedAt), toUnix(file.ExpiresAt),
-	)
-	if err != nil {
-		return fmt.Errorf("insert file: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit file: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) FileByID(ctx context.Context, id string) (File, error) {

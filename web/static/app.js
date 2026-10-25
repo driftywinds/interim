@@ -457,15 +457,73 @@
                 updateTask(task, "Paused · storage full", 0, true);
                 return;
             }
-            task.status = "uploading";
+            task.status = "creating";
             active++;
             if (cancelButton) cancelButton.disabled = false;
+            updateTask(task, "Requesting upload URL…", 0, false);
+
+            createUploadIntent(task).then((intent) => {
+                if (task.status === "canceled") {
+                    abortUploadIntent(intent, false);
+                    finishTask(task);
+                    return;
+                }
+                task.intent = intent;
+                sendFileDirect(task, intent);
+            }).catch((err) => {
+                task.status = "failed";
+                updateTask(task, err.message || "Could not start upload.", 0, true);
+                showError(err.message || "Could not start upload.");
+                finishTask(task);
+            });
+        }
+
+        async function createUploadIntent(task) {
+            const response = await fetch(uploadURL, {
+                method: "POST",
+                headers: {"Content-Type": "application/json", "Accept": "application/json"},
+                body: JSON.stringify({
+                    name: task.file.name,
+                    size: task.file.size,
+                    content_type: task.file.type || "application/octet-stream"
+                })
+            });
+            const body = await response.json().catch(() => null);
+            if (!response.ok || !body || !body.url) {
+                const message = body && body.error && body.error.message
+                    ? body.error.message
+                    : "Could not create an upload (" + response.status + ").";
+                if (response.status === 507) {
+                    setAccepting(false);
+                    refreshStatus();
+                }
+                throw new Error(message);
+            }
+            return body;
+        }
+
+        function sendFileDirect(task, intent) {
+            if (!intent || !intent.url || !intent.upload_token) {
+                task.status = "failed";
+                updateTask(task, "Upload URL was incomplete.", 0, true);
+                showError("Upload URL was incomplete.");
+                finishTask(task);
+                return;
+            }
+            task.status = "uploading";
             const xhr = new XMLHttpRequest();
             task.xhr = xhr;
-            xhr.open("POST", uploadURL, true);
-            xhr.setRequestHeader("X-File-Size", String(task.file.size));
-            xhr.setRequestHeader("Accept", "application/json");
-            updateTask(task, "Uploading · " + formatBytes(task.file.size), 0, false);
+            xhr.open("PUT", intent.url, true);
+            Object.keys(intent.headers || {}).forEach((name) => {
+                try {
+                    xhr.setRequestHeader(name, intent.headers[name]);
+                } catch (err) {
+                    // A provider may not require every returned header; if the
+                    // browser refuses one, the S3 response will be the source
+                    // of truth.
+                }
+            });
+            updateTask(task, "Uploading directly to storage · " + formatBytes(task.file.size), 0, false);
 
             xhr.upload.addEventListener("progress", (event) => {
                 if (!event.lengthComputable) return;
@@ -474,82 +532,119 @@
             });
 
             xhr.addEventListener("load", () => {
-                active--;
-                if (xhr.status === 201) {
-                    let data = null;
-                    try {
-                        data = JSON.parse(xhr.responseText);
-                    } catch (err) {}
-                    if (data && data.id) {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    task.status = "completing";
+                    updateTask(task, "Verifying upload…", 100, false);
+                    completeUploadIntent(intent).then((file) => {
                         task.status = "done";
-                        completed.push(data);
+                        completed.push(file);
                         localUploads.unshift({
-                            id: data.id,
-                            name: data.name,
-                            size: data.size,
-                            createdAt: data.created_at,
-                            expiresAt: data.expires_at,
-                            pageURL: data.page_url,
-                            deleteToken: data.delete_token
+                            id: file.id,
+                            name: file.name,
+                            size: file.size,
+                            createdAt: file.created_at,
+                            expiresAt: file.expires_at,
+                            pageURL: file.page_url,
+                            deleteToken: intent.delete_token
                         });
                         localUploads = localUploads.slice(0, MAX_LOCAL);
                         writeUploads(localUploads);
                         renderLocal();
-                        updateTask(task, "Done · " + formatBytes(data.size), 100, false);
+                        updateTask(task, "Done · " + formatBytes(file.size), 100, false);
                         if (task.el) {
                             task.el.cancel.hidden = true;
                             const open = document.createElement("a");
-                            open.href = data.page_url;
+                            open.href = file.page_url;
                             open.textContent = "Open file";
                             task.el.li.appendChild(open);
                         }
                         updateCopyButton();
                         refreshStatus();
-                    } else {
+                        finishTask(task);
+                    }).catch((err) => {
                         task.status = "failed";
-                        updateTask(task, "Done, but the response was unreadable", 100, true);
-                    }
-                } else {
-                    task.status = "failed";
-                    let message = "Upload failed (" + xhr.status + ").";
-                    try {
-                        const body = JSON.parse(xhr.responseText);
-                        if (body && body.error && body.error.message) message = body.error.message;
-                    } catch (err) {}
-                    updateTask(task, message, 100, true);
-                    if (xhr.status === 507) {
-                        setAccepting(false);
-                        refreshStatus();
-                    }
-                    showError(message);
+                        const message = err.message || "Upload finished, but verification failed.";
+                        updateTask(task, message, 100, true);
+                        showError(message);
+                        finishTask(task);
+                    });
+                    return;
                 }
+                task.status = "failed";
+                const message = "Upload to storage failed (HTTP " + xhr.status + ").";
+                updateTask(task, message, 100, true);
+                showError(message);
+                abortUploadIntent(intent, false);
                 finishTask(task);
             });
 
             xhr.addEventListener("error", () => {
-                active--;
                 task.status = "failed";
-                updateTask(task, "Network error", 0, true);
+                const message = "Upload to storage failed. Check the bucket CORS policy and public endpoint.";
+                updateTask(task, message, 0, true);
+                showError(message);
+                abortUploadIntent(intent, false);
                 finishTask(task);
             });
 
             xhr.addEventListener("abort", () => {
-                active--;
                 task.status = "canceled";
                 updateTask(task, "Canceled", 0, true);
+                abortUploadIntent(intent, false);
                 finishTask(task);
             });
 
-            xhr.send((() => {
-                const data = new FormData();
-                data.append("file", task.file, task.file.name);
-                return data;
-            })());
+            xhr.send(task.file);
+        }
+
+        async function completeUploadIntent(intent) {
+            let lastError = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const response = await fetch(intent.complete_url, {
+                        method: "POST",
+                        headers: {"X-Upload-Token": intent.upload_token, "Accept": "application/json"},
+                        cache: "no-store"
+                    });
+                    const body = await response.json().catch(() => null);
+                    if (response.ok && body && body.file) return body.file;
+                    const message = body && body.error && body.error.message
+                        ? body.error.message
+                        : "Could not finalize the upload (" + response.status + ").";
+                    lastError = new Error(message);
+                    if (response.status !== 409 && response.status < 500) break;
+                } catch (err) {
+                    lastError = err;
+                }
+                await sleep(1000 + attempt * 1000);
+            }
+            throw lastError || new Error("Could not finalize the upload.");
+        }
+
+        async function abortUploadIntent(intent, keepalive) {
+            if (!intent || intent.aborted) return;
+            intent.aborted = true;
+            try {
+                await fetch(intent.abort_url, {
+                    method: "DELETE",
+                    headers: {"X-Upload-Token": intent.upload_token},
+                    keepalive: Boolean(keepalive)
+                });
+            } catch (err) {
+                // The janitor will expire the intent and delete any object.
+            }
+        }
+
+        function sleep(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
         }
 
         function finishTask(task) {
+            if (task.finished) return;
+            task.finished = true;
+            active = Math.max(0, active - 1);
             if (task.el) task.el.cancel.hidden = true;
-            if (cancelButton) cancelButton.disabled = !tasks.some((item) => item.status === "uploading" || item.status === "queued");
+            if (cancelButton) cancelButton.disabled = !tasks.some((item) => item.status === "creating" || item.status === "uploading" || item.status === "completing" || item.status === "queued");
             startNext();
         }
 
@@ -560,7 +655,17 @@
                 if (task.el) task.el.cancel.hidden = true;
                 return;
             }
-            if (task.xhr) task.xhr.abort();
+            if (task.status === "completing") {
+                toast("Finalizing upload; please wait.");
+                return;
+            }
+            task.status = "canceled";
+            if (task.xhr) {
+                task.xhr.abort();
+            } else if (task.intent) {
+                abortUploadIntent(task.intent, false);
+                finishTask(task);
+            }
         }
 
         if (uploadButton) {
@@ -578,7 +683,7 @@
         if (cancelButton) {
             cancelButton.addEventListener("click", () => {
                 tasks.forEach((task) => {
-                    if (task.status === "uploading" || task.status === "queued") abortTask(task);
+                    if (task.status === "creating" || task.status === "uploading" || task.status === "queued") abortTask(task);
                 });
                 toast("Uploads canceled");
             });
@@ -648,11 +753,19 @@
         }
 
         window.addEventListener("beforeunload", (event) => {
-            if (tasks.some((task) => task.status === "uploading" || task.status === "queued")) {
+            if (tasks.some((task) => task.status === "creating" || task.status === "uploading" || task.status === "completing" || task.status === "queued")) {
                 event.preventDefault();
                 event.returnValue = "You have an ongoing upload.";
                 return event.returnValue;
             }
+        });
+
+        window.addEventListener("pagehide", () => {
+            tasks.forEach((task) => {
+                if (task.intent && !task.intent.aborted && (task.status === "uploading" || task.status === "completing")) {
+                    abortUploadIntent(task.intent, true);
+                }
+            });
         });
 
         setAccepting(accepting);

@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: interim API
-  version: 1.0.0
+  version: 2.0.0
   description: |
-    interim is a temporary file host. Every file is permanently deleted after
-    the instance's configured retention period (7 days by default). Uploads are
-    anonymous by default; user hashes act as bearer credentials for API clients.
-    Download URLs are short-lived signed S3 URLs and are never permanent.
+    interim is a temporary file host. Files expire after the instance's
+    configured retention period (7 days by default). Uploads are direct to
+    S3-compatible storage: interim reserves quota and signs a short-lived PUT
+    URL, the client uploads the bytes, then interim verifies the object and
+    commits the file record. Download URLs are short-lived signed S3 URLs.
   contact:
     name: interim
 servers:
@@ -15,8 +16,10 @@ servers:
 tags:
   - name: Auth
     description: User hashes used as API credentials.
+  - name: Uploads
+    description: Create, complete, and abort direct-to-S3 upload intents.
   - name: Files
-    description: Upload, inspect, download, and delete files.
+    description: Inspect, download, list, and delete committed files.
   - name: System
     description: Public service status.
 paths:
@@ -73,40 +76,53 @@ paths:
                 $ref: "#/components/schemas/KeyInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
-  /api/v1/files:
+  /api/v1/uploads:
     post:
-      tags: [Files]
-      operationId: uploadFile
-      summary: Upload one file
+      tags: [Uploads]
+      operationId: createUploadIntent
+      summary: Reserve quota and sign a PUT URL
       description: |
-        Uploads a single file as multipart/form-data. Authentication is optional.
-        Send X-File-Size with the exact file size. If X-File-Size is absent, a
-        Content-Length request body is required.
+        Validates the declared name and size, reserves storage atomically, and
+        returns a short-lived presigned PUT URL. Authentication is optional.
+        The client must PUT exactly to the returned URL with the returned
+        headers, then call the complete endpoint.
       security:
         - bearerAuth: []
         - {}
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/json:
             schema:
               type: object
-              required: [file]
+              required: [name, size]
               properties:
-                file:
+                name:
                   type: string
-                  format: binary
+                  maxLength: 180
+                size:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  maximum: 5368709120
+                content_type:
+                  type: string
+                  maxLength: 255
       responses:
         "201":
-          description: File uploaded. delete_token is shown only in this response.
+          description: Upload intent and presigned PUT URL.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/UploadedFile"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
+                $ref: "#/components/schemas/UploadIntent"
+        "400":
+          description: Invalid name or size.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "413":
-          description: File exceeds MAX_FILE_SIZE.
+          description: File exceeds MAX_FILE_SIZE or the 5 GB single-PUT limit.
           content:
             application/json:
               schema:
@@ -117,6 +133,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /api/v1/uploads/{id}/complete:
+    post:
+      tags: [Uploads]
+      operationId: completeUpload
+      summary: Verify and commit an uploaded object
+      description: |
+        Requires X-Upload-Token. Performs a HEAD on the object, verifies actual
+        size against the declared size and configured cap, consumes the quota
+        reservation, and inserts the file record. Retrying a committed upload
+        returns the existing file.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+      responses:
+        "200":
+          description: The upload was already committed; existing file returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompletedUpload"
+        "201":
+          description: File committed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompletedUpload"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Upload token is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The PUT has not reached S3 yet; retry completion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "410":
+          description: Upload window expired or intent is closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Actual object is larger than declared or allowed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/uploads/{id}:
+    delete:
+      tags: [Uploads]
+      operationId: abortUpload
+      summary: Abort a pending upload
+      description: Deletes any object at the intent's key, releases its quota reservation, and closes the intent. Requires X-Upload-Token.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+      responses:
+        "204":
+          description: Upload closed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Upload token is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Upload was already committed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/files:
     get:
       tags: [Files]
       operationId: listFiles
@@ -175,10 +274,8 @@ paths:
     delete:
       tags: [Files]
       operationId: deleteFile
-      summary: Delete a file
-      description: |
-        Requires either the owning user hash or the one-time per-file
-        X-Delete-Token returned by upload.
+      summary: Delete a committed file
+      description: Requires either the owning user hash or the one-time per-file delete token returned by the upload intent.
       parameters:
         - $ref: "#/components/parameters/FileID"
         - name: X-Delete-Token
@@ -237,21 +334,33 @@ components:
       required: true
       schema:
         type: string
+    UploadID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    UploadToken:
+      name: X-Upload-Token
+      in: header
+      required: true
+      schema:
+        type: string
   responses:
     Unauthorized:
-      description: Missing or invalid user hash.
+      description: Missing or invalid credential.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: File or endpoint not found.
+      description: File, upload, or endpoint not found.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Gone:
-      description: The configured retention period has ended.
+      description: The file retention period has ended.
       content:
         application/json:
           schema:
@@ -298,20 +407,58 @@ components:
         owner:
           type: string
           enum: [anonymous, user_hash]
-    UploadedFile:
-      allOf:
-        - $ref: "#/components/schemas/File"
-        - type: object
-          required: [delete_token, delete_token_header, warning]
-          properties:
-            delete_token:
-              type: string
-              description: Shown once. Required to delete an anonymous upload.
-            delete_token_header:
-              type: string
-              const: X-Delete-Token
-            warning:
-              type: string
+    UploadIntent:
+      type: object
+      required:
+        [upload_id, url, method, headers, expires_at, intent_expires_at, upload_token, complete_url, abort_url, delete_token, delete_token_header, warning]
+      properties:
+        upload_id:
+          type: string
+        url:
+          type: string
+          format: uri
+          description: Presigned S3 PUT URL.
+        method:
+          type: string
+          const: PUT
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Required request headers for the PUT.
+        expires_at:
+          type: string
+          format: date-time
+          description: Expiry of the presigned PUT URL.
+        intent_expires_at:
+          type: string
+          format: date-time
+          description: Deadline for completion.
+        upload_token:
+          type: string
+          description: One-time token for complete/abort; never put it in a URL.
+        complete_url:
+          type: string
+          format: uri
+        abort_url:
+          type: string
+          format: uri
+        delete_token:
+          type: string
+          description: Shown once. Required to delete an anonymous file.
+        delete_token_header:
+          type: string
+          const: X-Delete-Token
+        warning:
+          type: string
+    CompletedUpload:
+      type: object
+      required: [upload_id, file]
+      properties:
+        upload_id:
+          type: string
+        file:
+          $ref: "#/components/schemas/File"
     CreatedKey:
       type: object
       required: [id, user_hash, key_prefix, created_at, warning]
@@ -406,10 +553,8 @@ components:
         retention_seconds:
           type: integer
           format: int64
-          description: Configured lifetime of newly uploaded files, in seconds.
         retention_human:
           type: string
-          description: Human-readable retention label, for example "7 days".
         max_file_size_bytes:
           type: integer
           format: int64

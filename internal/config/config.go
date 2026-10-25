@@ -24,9 +24,9 @@ const (
 	// with RETENTION in the environment.
 	DefaultRetention = 7 * 24 * time.Hour
 
-	// UploadOverheadAllowance covers multipart boundaries and headers when
-	// enforcing the request body limit.
-	UploadOverheadAllowance = 2 << 20
+	// MaxSinglePutSize is the S3 single-PUT object limit. interim uses direct
+	// browser PUTs and does not implement multipart uploads.
+	MaxSinglePutSize int64 = 5 << 30
 )
 
 type Config struct {
@@ -40,11 +40,13 @@ type Config struct {
 	TrustProxy    bool
 	LogLevel      string
 
-	Retention   time.Duration
-	MaxStorage  int64
-	MaxFileSize int64
-	DownloadTTL time.Duration
-	S3          S3Config
+	Retention       time.Duration
+	MaxStorage      int64
+	MaxFileSize     int64
+	DownloadTTL     time.Duration
+	UploadURLTTL    time.Duration
+	UploadIntentTTL time.Duration
+	S3              S3Config
 }
 
 type S3Config struct {
@@ -57,8 +59,6 @@ type S3Config struct {
 	Prefix         string
 	PathStyle      bool
 	AutoCreate     bool
-	PartSize       int64
-	Concurrency    int
 }
 
 func Load() (Config, error) {
@@ -99,6 +99,9 @@ func Load() (Config, error) {
 	if maxFileSize > maxStorage {
 		return Config{}, errors.New("MAX_FILE_SIZE cannot be larger than MAX_STORAGE")
 	}
+	if maxFileSize > MaxSinglePutSize {
+		return Config{}, fmt.Errorf("MAX_FILE_SIZE cannot exceed %s because direct uploads use a single S3 PUT", units.FormatBytes(MaxSinglePutSize))
+	}
 
 	retention, err := parseRetention(envOr("RETENTION", "7d"))
 	if err != nil {
@@ -114,6 +117,22 @@ func Load() (Config, error) {
 	}
 	if downloadTTL < 30*time.Second || downloadTTL > time.Hour {
 		return Config{}, errors.New("DOWNLOAD_URL_TTL must be between 30s and 1h")
+	}
+
+	uploadURLTTL, err := parseDuration("UPLOAD_URL_TTL", "30m")
+	if err != nil {
+		return Config{}, err
+	}
+	if uploadURLTTL < 5*time.Minute || uploadURLTTL > 2*time.Hour {
+		return Config{}, errors.New("UPLOAD_URL_TTL must be between 5m and 2h")
+	}
+
+	uploadIntentTTL, err := parseDuration("UPLOAD_INTENT_TTL", "45m")
+	if err != nil {
+		return Config{}, err
+	}
+	if uploadIntentTTL < uploadURLTTL || uploadIntentTTL > 6*time.Hour {
+		return Config{}, errors.New("UPLOAD_INTENT_TTL must be at least UPLOAD_URL_TTL and no more than 6h")
 	}
 
 	sessionTTL, err := parseDuration("ADMIN_SESSION_TTL", "12h")
@@ -147,20 +166,22 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		PublicBaseURL: publicBaseURL,
-		ListenAddr:    envOr("LISTEN_ADDR", ":8080"),
-		DataDir:       dataDir,
-		DatabasePath:  databasePath,
-		SessionSecret: secret,
-		SessionTTL:    sessionTTL,
-		CookieSecure:  cookieSecure,
-		TrustProxy:    trustProxy,
-		LogLevel:      logLevel,
-		Retention:     retention,
-		MaxStorage:    maxStorage,
-		MaxFileSize:   maxFileSize,
-		DownloadTTL:   downloadTTL,
-		S3:            s3,
+		PublicBaseURL:   publicBaseURL,
+		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
+		DataDir:         dataDir,
+		DatabasePath:    databasePath,
+		SessionSecret:   secret,
+		SessionTTL:      sessionTTL,
+		CookieSecure:    cookieSecure,
+		TrustProxy:      trustProxy,
+		LogLevel:        logLevel,
+		Retention:       retention,
+		MaxStorage:      maxStorage,
+		MaxFileSize:     maxFileSize,
+		DownloadTTL:     downloadTTL,
+		UploadURLTTL:    uploadURLTTL,
+		UploadIntentTTL: uploadIntentTTL,
+		S3:              s3,
 	}, nil
 }
 
@@ -200,19 +221,6 @@ func loadS3() (S3Config, error) {
 		return S3Config{}, err
 	}
 
-	partSize, err := units.ParseBytes(envOr("S3_PART_SIZE", "16MB"))
-	if err != nil {
-		return S3Config{}, fmt.Errorf("S3_PART_SIZE: %w", err)
-	}
-	if partSize < 5<<20 || partSize > 5<<30 {
-		return S3Config{}, errors.New("S3_PART_SIZE must be between 5MB and 5GB")
-	}
-
-	concurrency, err := strconv.Atoi(envOr("S3_UPLOAD_CONCURRENCY", "3"))
-	if err != nil || concurrency < 1 || concurrency > 16 {
-		return S3Config{}, errors.New("S3_UPLOAD_CONCURRENCY must be an integer from 1 to 16")
-	}
-
 	prefix := strings.Trim(strings.TrimSpace(os.Getenv("S3_OBJECT_PREFIX")), "/")
 	if prefix == "" {
 		prefix = "files"
@@ -229,8 +237,6 @@ func loadS3() (S3Config, error) {
 		Prefix:         prefix,
 		PathStyle:      pathStyle,
 		AutoCreate:     autoCreate,
-		PartSize:       partSize,
-		Concurrency:    concurrency,
 	}, nil
 }
 

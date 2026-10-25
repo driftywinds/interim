@@ -2,83 +2,107 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
+	"time"
 
 	"interim/internal/config"
+	"interim/internal/objects"
 	"interim/internal/store"
 	"interim/internal/units"
 )
 
-type boundedFileReader struct {
-	reader io.Reader
-	max    int64
-	n      int64
+const uploadTokenHeader = "X-Upload-Token"
+
+type uploadIntentDTO struct {
+	UploadID          string            `json:"upload_id"`
+	URL               string            `json:"url"`
+	Method            string            `json:"method"`
+	Headers           map[string]string `json:"headers"`
+	ExpiresAt         time.Time         `json:"expires_at"`
+	IntentExpiresAt   time.Time         `json:"intent_expires_at"`
+	UploadToken       string            `json:"upload_token"`
+	CompleteURL       string            `json:"complete_url"`
+	AbortURL          string            `json:"abort_url"`
+	DeleteToken       string            `json:"delete_token"`
+	DeleteTokenHeader string            `json:"delete_token_header"`
+	Warning           string            `json:"warning"`
 }
 
-func (b *boundedFileReader) Read(p []byte) (int, error) {
-	if b.n > b.max {
-		return 0, uploadTooLarge
-	}
-	remaining := b.max + 1 - b.n
-	if remaining <= 0 {
-		return 0, uploadTooLarge
-	}
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-	n, err := b.reader.Read(p)
-	b.n += int64(n)
-	return n, err
+type completeUploadDTO struct {
+	UploadID string  `json:"upload_id"`
+	File     fileDTO `json:"file"`
 }
 
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	key, err := s.optionalAPIKey(r)
 	if err != nil {
 		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "The supplied user hash is invalid or revoked.")
 		return
 	}
-
-	maxRequest := s.cfg.MaxFileSize + config.UploadOverheadAllowance
-	if r.ContentLength > maxRequest {
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The upload exceeds the %s per-file limit.", unitsLabel(s.cfg.MaxFileSize)))
+	ip := s.clientIP(r)
+	if allowed, retry := s.limiter.allow("uploadintent:"+ip, 120, 10*time.Minute); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		s.writeAPIError(w, r, http.StatusTooManyRequests, "rate_limited", "Too many uploads requested. Try again shortly.")
 		return
 	}
 
-	declared, hasDeclared := parsePositiveInt64(r.Header.Get("X-File-Size"))
-	if hasDeclared && declared > s.cfg.MaxFileSize {
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The file exceeds the %s per-file limit.", unitsLabel(s.cfg.MaxFileSize)))
-		return
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var request struct {
+		Name        string `json:"name"`
+		Size        int64  `json:"size"`
+		ContentType string `json:"content_type"`
 	}
-
-	reserveBytes := declared
-	if !hasDeclared {
-		if r.ContentLength <= 0 {
-			s.writeAPIError(w, r, http.StatusLengthRequired, "length_required", "Content-Length is required unless X-File-Size is supplied.")
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if errors.Is(err, io.EOF) {
+			s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with name and size is required.")
 			return
 		}
-		reserveBytes = r.ContentLength
-		if reserveBytes > s.cfg.MaxFileSize {
-			reserveBytes = s.cfg.MaxFileSize
-		}
-	}
-	if reserveBytes <= 0 {
-		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The file is empty.")
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
 		return
 	}
 
-	now := s.now().UTC()
-	reservationID, err := randomToken(16)
-	if err != nil {
-		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not start the upload.")
+	name := sanitizeFilename(request.Name)
+	if request.Size <= 0 {
+		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The file size must be greater than zero.")
 		return
 	}
-	reserved, err := s.store.ReserveStorage(r.Context(), reservationID, reserveBytes, s.cfg.MaxStorage, now, now.Add(maxReservation))
+	if request.Size > s.cfg.MaxFileSize {
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The file exceeds the %s per-file limit.", units.FormatBytes(s.cfg.MaxFileSize)))
+		return
+	}
+	if request.Size > config.MaxSinglePutSize {
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "Direct uploads support at most 5 GB per file.")
+		return
+	}
+	contentType := objects.SanitizeContentType(request.ContentType)
+
+	now := s.now().UTC()
+	uploadID, err := randomToken(12)
 	if err != nil {
-		s.logger.Error("reserve storage", "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create an upload.")
+		return
+	}
+	uploadToken, err := randomToken(32)
+	if err != nil {
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create an upload.")
+		return
+	}
+	deleteToken, err := randomToken(32)
+	if err != nil {
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create an upload.")
+		return
+	}
+
+	objectKey := s.cfg.S3.Prefix + uploadID
+	intentExpires := now.Add(s.cfg.UploadIntentTTL)
+	reservationExpires := intentExpires.Add(time.Hour)
+	reserved, err := s.store.ReserveStorage(r.Context(), uploadID, request.Size, s.cfg.MaxStorage, now, reservationExpires)
+	if err != nil {
+		s.logger.Error("reserve upload storage", "error", err)
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not reserve storage.")
 		return
 	}
@@ -87,128 +111,221 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	finalized := false
-	defer func() {
-		if !finalized {
-			s.releaseReservationDetached(reservationID)
-		}
-	}()
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequest)
-	multipartReader, err := r.MultipartReader()
-	if err != nil {
-		s.writeAPIError(w, r, http.StatusUnsupportedMediaType, "invalid_upload", "Uploads must use multipart/form-data with a file field.")
-		return
-	}
-
-	var (
-		part        *multipart.Part
-		fileLimit   = s.cfg.MaxFileSize
-		fileName    string
-		contentType = "application/octet-stream"
-	)
-	if hasDeclared {
-		fileLimit = declared
-	}
-	for {
-		part, err = multipartReader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			s.writeAPIError(w, r, http.StatusBadRequest, "invalid_upload", "The multipart upload could not be read.")
-			return
-		}
-		if part.FormName() == "file" {
-			fileName = sanitizeFilename(part.FileName())
-			contentType = parseContentType(part.Header.Get("Content-Type"))
-			break
-		}
-		_ = part.Close()
-	}
-	if part == nil {
-		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_upload", "A file field is required.")
-		return
-	}
-	defer part.Close()
-
-	fileID, err := randomToken(12)
-	if err != nil {
-		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not allocate a file ID.")
-		return
-	}
-	objectKey := s.cfg.S3.Prefix + fileID
-	reader := &boundedFileReader{reader: part, max: fileLimit}
-
-	putErr := s.objects.Put(r.Context(), objectKey, reader, contentType, fileName)
-	if putErr != nil {
-		var maxBytesErr *http.MaxBytesError
-		switch {
-		case errors.Is(putErr, uploadTooLarge) || errors.As(putErr, &maxBytesErr):
-			s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The upload exceeds the declared or configured size limit.")
-		case errors.Is(putErr, context.Canceled), errors.Is(putErr, context.DeadlineExceeded):
-			// The client went away; no response body matters.
-			return
-		default:
-			s.logger.Error("upload object", "error", putErr)
-			s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Upload failed while writing to storage.")
-		}
-		return
-	}
-	if reader.n <= 0 {
-		s.deleteObjectDetached(objectKey)
-		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The file is empty.")
-		return
-	}
-	if reader.n > fileLimit {
-		s.deleteObjectDetached(objectKey)
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The upload exceeds the declared or configured size limit.")
-		return
-	}
-
-	deleteToken, err := randomToken(32)
-	if err != nil {
-		s.deleteObjectDetached(objectKey)
-		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a delete token.")
-		return
-	}
-	createdAt := s.now().UTC()
-	file := store.File{
-		ID:              fileID,
+	intent := store.UploadIntent{
+		ID:              uploadID,
 		ObjectKey:       objectKey,
 		APIKeyID:        apiKeyID(key),
-		OriginalName:    fileName,
+		OriginalName:    name,
 		ContentType:     contentType,
-		Size:            reader.n,
+		DeclaredSize:    request.Size,
+		UploadTokenHash: tokenHash(uploadToken),
 		DeleteTokenHash: tokenHash(deleteToken),
-		CreatedAt:       createdAt,
-		ExpiresAt:       createdAt.Add(s.cfg.Retention),
+		State:           "pending",
+		CreatedAt:       now,
+		ExpiresAt:       intentExpires,
+	}
+	if err := s.store.CreateUploadIntent(r.Context(), intent); err != nil {
+		s.releaseReservationDetached(uploadID)
+		s.logger.Error("create upload intent", "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create an upload.")
+		return
 	}
 
-	if err := s.store.CreateFileWithReservation(r.Context(), file, reservationID, reserveBytes); err != nil {
-		s.deleteObjectDetached(objectKey)
+	disposition := objects.AttachmentDisposition(name)
+	url, expiresAt, err := s.objects.PresignPut(r.Context(), objectKey, contentType, disposition, s.cfg.UploadURLTTL)
+	if err != nil {
+		s.logger.Error("presign upload", "upload_id", uploadID, "error", err)
+		if closeErr := s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now()); closeErr != nil {
+			s.logger.Error("close failed upload intent", "upload_id", uploadID, "error", closeErr)
+		}
+		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create an upload URL.")
+		return
+	}
+
+	response := uploadIntentDTO{
+		UploadID: uploadID,
+		URL:      url,
+		Method:   http.MethodPut,
+		Headers: map[string]string{
+			"Content-Type":        contentType,
+			"Content-Disposition": disposition,
+		},
+		ExpiresAt:         expiresAt,
+		IntentExpiresAt:   intentExpires,
+		UploadToken:       uploadToken,
+		CompleteURL:       s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID + "/complete",
+		AbortURL:          s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID,
+		DeleteToken:       deleteToken,
+		DeleteTokenHeader: "X-Delete-Token",
+		Warning:           "Upload directly to the signed URL, then call complete_url with the upload token. Keep delete_token private.",
+	}
+	w.Header().Set("Location", response.CompleteURL)
+	s.writeJSON(w, http.StatusCreated, response)
+}
+
+func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
+	intent, ok := s.authenticateUploadIntent(w, r)
+	if !ok {
+		return
+	}
+
+	switch intent.State {
+	case "committed":
+		if intent.FileID == nil {
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "The upload was committed but its file link is missing.")
+			return
+		}
+		file, err := s.store.FileByID(r.Context(), *intent.FileID)
+		if err != nil {
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "The upload was committed but its file record is unavailable.")
+			return
+		}
+		s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(file)})
+		return
+	case "aborted", "expired", "failed":
+		s.writeAPIError(w, r, http.StatusGone, "upload_closed", "This upload is no longer pending.")
+		return
+	}
+
+	now := s.now().UTC()
+	if !intent.ExpiresAt.After(now) {
+		s.expireUploadIntent(r.Context(), intent)
+		s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload window expired. The temporary object has been deleted.")
+		return
+	}
+
+	info, err := s.objects.Head(r.Context(), intent.ObjectKey)
+	if err != nil {
+		if errors.Is(err, objects.ErrNotFound) {
+			s.writeAPIError(w, r, http.StatusConflict, "upload_missing", "The object has not reached storage yet. Retry completion after the PUT finishes.")
+			return
+		}
+		s.logger.Error("head uploaded object", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not verify the uploaded object.")
+		return
+	}
+
+	switch {
+	case info.Size <= 0:
+		s.failUploadIntent(r.Context(), intent, "Uploaded object is empty.")
+		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The uploaded object is empty.")
+		return
+	case info.Size > intent.DeclaredSize:
+		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds declared size.")
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The uploaded object is larger than the declared size.")
+		return
+	case info.Size > s.cfg.MaxFileSize:
+		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds per-file cap.")
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The uploaded object exceeds the per-file limit.")
+		return
+	}
+
+	completedAt := s.now().UTC()
+	file := store.File{
+		ID:              intent.ID,
+		ObjectKey:       intent.ObjectKey,
+		APIKeyID:        intent.APIKeyID,
+		OriginalName:    intent.OriginalName,
+		ContentType:     intent.ContentType,
+		Size:            info.Size,
+		DeleteTokenHash: intent.DeleteTokenHash,
+		CreatedAt:       completedAt,
+		ExpiresAt:       completedAt.Add(s.cfg.Retention),
+	}
+	if err := s.store.CommitUploadIntent(r.Context(), intent.ID, file, completedAt); err != nil {
 		switch {
+		case errors.Is(err, store.ErrUploadIntentState):
+			reloaded, loadErr := s.store.UploadIntentByID(r.Context(), intent.ID)
+			if loadErr == nil && reloaded.State == "committed" && reloaded.FileID != nil {
+				if committed, fileErr := s.store.FileByID(r.Context(), *reloaded.FileID); fileErr == nil {
+					s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: reloaded.ID, File: s.fileDTO(committed)})
+					return
+				}
+			}
+			s.writeAPIError(w, r, http.StatusConflict, "upload_closed", "The upload is no longer pending.")
 		case errors.Is(err, store.ErrReservationMissing):
-			s.logger.Warn("reservation expired before upload commit", "reservation", reservationID)
-			s.writeAPIError(w, r, http.StatusInsufficientStorage, "storage_full", "Storage reservation expired. Please try again.")
-		case errors.Is(err, store.ErrReservationTooSmall):
-			s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "Uploaded data exceeded the reserved capacity.")
+			s.deleteObjectDetached(intent.ObjectKey)
+			_ = s.store.CloseUploadIntent(context.Background(), intent.ID, "failed", s.now())
+			s.logger.Warn("upload reservation missing at completion", "upload_id", intent.ID)
+			s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload reservation is no longer valid.")
 		default:
-			s.logger.Error("commit uploaded file", "error", err)
-			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not save file metadata.")
+			s.logger.Error("commit upload intent", "upload_id", intent.ID, "error", err)
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not commit the uploaded file.")
 		}
 		return
 	}
-	finalized = true
 
-	response := uploadDTO{
-		fileDTO:           s.fileDTO(file),
-		DeleteToken:       deleteToken,
-		DeleteTokenHeader: "X-Delete-Token",
-		Warning:           "Keep delete_token private. It is the only way to delete this anonymous upload.",
+	s.writeJSON(w, http.StatusCreated, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(file)})
+}
+
+func (s *Server) handleAbortUpload(w http.ResponseWriter, r *http.Request) {
+	intent, ok := s.authenticateUploadIntent(w, r)
+	if !ok {
+		return
 	}
-	w.Header().Set("Location", response.APIURL)
-	s.writeJSON(w, http.StatusCreated, response)
+	switch intent.State {
+	case "committed":
+		s.writeAPIError(w, r, http.StatusConflict, "already_committed", "This upload has already been committed.")
+		return
+	case "aborted", "expired", "failed":
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
+		s.logger.Error("delete aborted upload object", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not remove the uploaded object. The janitor will retry.")
+		return
+	}
+	if err := s.store.CloseUploadIntent(r.Context(), intent.ID, "aborted", s.now()); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("close aborted upload", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not close the upload.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) authenticateUploadIntent(w http.ResponseWriter, r *http.Request) (store.UploadIntent, bool) {
+	token := r.Header.Get(uploadTokenHeader)
+	if token == "" || len(token) > 256 {
+		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "The upload token is required.")
+		return store.UploadIntent{}, false
+	}
+	intent, err := s.store.UploadIntentByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.writeAPIError(w, r, http.StatusNotFound, "not_found", "Upload not found.")
+			return store.UploadIntent{}, false
+		}
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not read the upload.")
+		return store.UploadIntent{}, false
+	}
+	if !hashEquals(tokenHash(token), intent.UploadTokenHash) {
+		s.writeAPIError(w, r, http.StatusForbidden, "forbidden", "The upload token is invalid.")
+		return store.UploadIntent{}, false
+	}
+	return intent, true
+}
+
+func (s *Server) expireUploadIntent(ctx context.Context, intent store.UploadIntent) {
+	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
+		s.logger.Error("delete expired upload object", "upload_id", intent.ID, "error", err)
+	}
+	if err := s.store.CloseUploadIntent(ctx, intent.ID, "expired", s.now()); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("close expired upload", "upload_id", intent.ID, "error", err)
+	}
+}
+
+func (s *Server) failUploadIntent(ctx context.Context, intent store.UploadIntent, reason string) {
+	s.logger.Warn("upload failed verification", "upload_id", intent.ID, "reason", reason)
+	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
+		s.logger.Error("delete failed upload object", "upload_id", intent.ID, "error", err)
+	}
+	if err := s.store.CloseUploadIntent(ctx, intent.ID, "failed", s.now()); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger.Error("close failed upload", "upload_id", intent.ID, "error", err)
+	}
 }
 
 func apiKeyID(key *store.APIKey) *string {
@@ -217,8 +334,4 @@ func apiKeyID(key *store.APIKey) *string {
 	}
 	id := key.ID
 	return &id
-}
-
-func unitsLabel(bytes int64) string {
-	return units.FormatBytes(bytes)
 }

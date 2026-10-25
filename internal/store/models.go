@@ -66,3 +66,19 @@ type APIKeyUsage struct {
 	Files int64
 	Bytes int64
 }
+
+type UploadIntent struct {
+	ID              string
+	ObjectKey       string
+	APIKeyID        *string
+	OriginalName    string
+	ContentType     string
+	DeclaredSize    int64
+	UploadTokenHash []byte
+	DeleteTokenHash []byte
+	State           string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	CompletedAt     *time.Time
+	FileID          *string
+}

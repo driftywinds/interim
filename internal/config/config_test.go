@@ -41,6 +41,12 @@ func TestLoad(t *testing.T) {
 	if cfg.Retention != 7*24*time.Hour {
 		t.Errorf("retention = %v", cfg.Retention)
 	}
+	if cfg.UploadURLTTL != 30*time.Minute || cfg.UploadIntentTTL != 45*time.Minute {
+		t.Errorf("upload TTLs = %v / %v", cfg.UploadURLTTL, cfg.UploadIntentTTL)
+	}
+	if cfg.MaxFileSize != MaxSinglePutSize {
+		t.Errorf("max file size = %d", cfg.MaxFileSize)
+	}
 }
 
 func TestRetentionFormats(t *testing.T) {
@@ -74,11 +80,13 @@ func TestRetentionFormats(t *testing.T) {
 
 func TestLoadRejectsBadValues(t *testing.T) {
 	tests := map[string]string{
-		"PUBLIC_BASE_URL": "",
-		"MAX_STORAGE":     "nope",
-		"MAX_FILE_SIZE":   "40GB",
-		"S3_BUCKET":       "",
-		"COOKIE_SECURE":   "sometimes",
+		"PUBLIC_BASE_URL":   "",
+		"MAX_STORAGE":       "nope",
+		"MAX_FILE_SIZE":     "6GB",
+		"S3_BUCKET":         "",
+		"COOKIE_SECURE":     "sometimes",
+		"UPLOAD_INTENT_TTL": "10m",
+		"UPLOAD_URL_TTL":    "3h",
 	}
 	for name, value := range tests {
 		t.Run(name, func(t *testing.T) {

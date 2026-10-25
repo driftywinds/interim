@@ -56,7 +56,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply sqlite schema: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -68,12 +68,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// ResetForStartup removes state that cannot survive a process restart. Upload
-// reservations from a previous process are orphaned because their HTTP
-// request is gone.
+// ResetForStartup removes only state that cannot survive a process restart.
+// Pending upload intents and their reservations are persisted because the
+// browser may already have uploaded an object; the janitor reconciles them.
 func (s *Store) ResetForStartup(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM storage_reservations"); err != nil {
-		return fmt.Errorf("clear stale upload reservations: %w", err)
+	if _, err := s.CleanOrphanReservations(ctx); err != nil {
+		return err
 	}
 	if _, err := s.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return err

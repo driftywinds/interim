@@ -51,3 +51,23 @@ CREATE TABLE IF NOT EXISTS storage_reservations (
 );
 
 CREATE INDEX IF NOT EXISTS storage_reservations_expires_at ON storage_reservations(expires_at);
+
+CREATE TABLE IF NOT EXISTS upload_intents (
+    id                 TEXT PRIMARY KEY,
+    object_key         TEXT NOT NULL UNIQUE,
+    api_key_id         TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+    original_name      TEXT NOT NULL,
+    content_type       TEXT NOT NULL,
+    declared_size      INTEGER NOT NULL CHECK (declared_size > 0),
+    upload_token_hash  BLOB NOT NULL,
+    delete_token_hash  BLOB NOT NULL,
+    state              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending', 'committed', 'aborted', 'expired', 'failed')),
+    created_at         INTEGER NOT NULL,
+    expires_at         INTEGER NOT NULL,
+    completed_at       INTEGER,
+    file_id            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS upload_intents_state_expires ON upload_intents(state, expires_at);
+CREATE INDEX IF NOT EXISTS upload_intents_expires_at ON upload_intents(expires_at);

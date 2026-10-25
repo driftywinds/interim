@@ -57,12 +57,13 @@ type FilePageView struct {
 
 type APIDocsView struct {
 	PageData
-	APIBase     string
-	OpenAPIJSON string
-	OpenAPIYAML string
-	MaxFileSize string
-	MaxStorage  string
-	DownloadTTL string
+	APIBase      string
+	OpenAPIJSON  string
+	OpenAPIYAML  string
+	MaxFileSize  string
+	MaxStorage   string
+	DownloadTTL  string
+	UploadURLTTL string
 }
 
 type AdminView struct {

@@ -37,13 +37,6 @@ type fileDTO struct {
 	Owner       string    `json:"owner"`
 }
 
-type uploadDTO struct {
-	fileDTO
-	DeleteToken       string `json:"delete_token"`
-	DeleteTokenHeader string `json:"delete_token_header"`
-	Warning           string `json:"warning"`
-}
-
 type keyDTO struct {
 	ID        string    `json:"id"`
 	UserHash  string    `json:"user_hash"`
@@ -263,7 +256,9 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 			"status":           "/api/v1/status",
 			"create_user_hash": "/api/v1/keys",
 			"key_info":         "/api/v1/keys/me",
-			"upload":           "/api/v1/files",
+			"create_upload":    "/api/v1/uploads",
+			"complete_upload":  "/api/v1/uploads/{id}/complete",
+			"abort_upload":     "/api/v1/uploads/{id}",
 			"list":             "/api/v1/files",
 			"metadata":         "/api/v1/files/{id}",
 			"download":         "/api/v1/files/{id}/download",
@@ -397,7 +392,7 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, expires, err := s.objects.PresignGet(r.Context(), file.ObjectKey, s.cfg.DownloadTTL)
+	url, expires, err := s.objects.PresignGet(r.Context(), file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL)
 	if err != nil {
 		s.logger.Error("presign download", "file_id", file.ID, "error", err)
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a download link.")
@@ -444,7 +439,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 			s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "Provide a user hash or the file's delete token.")
 			return
 		}
-		if !hashEquals(tokenHash(token), file.DeleteTokenHash) {
+		if len(token) > 256 || !hashEquals(tokenHash(token), file.DeleteTokenHash) {
 			s.writeAPIError(w, r, http.StatusForbidden, "forbidden", "The delete token is invalid.")
 			return
 		}

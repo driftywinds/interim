@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"mime"
 	"net"
@@ -16,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -24,17 +22,28 @@ import (
 	"interim/internal/config"
 )
 
+var ErrNotFound = errors.New("object not found")
+
+type ObjectInfo struct {
+	Key          string
+	Size         int64
+	ContentType  string
+	ETag         string
+	LastModified time.Time
+}
+
 type Store interface {
-	Put(ctx context.Context, key string, body io.Reader, contentType, filename string) error
 	Delete(ctx context.Context, key string) error
-	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, time.Time, error)
+	PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error)
+	PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error)
+	Head(ctx context.Context, key string) (ObjectInfo, error)
+	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 	Health(ctx context.Context) error
 }
 
 type S3Store struct {
 	client    *s3.Client
 	presigner *s3.PresignClient
-	uploader  *manager.Uploader
 	bucket    string
 	logger    *slog.Logger
 }
@@ -85,12 +94,6 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 		presigner: s3.NewPresignClient(publicClient),
 		bucket:    cfg.S3.Bucket,
 		logger:    logger,
-		uploader: manager.NewUploader(client, func(uploader *manager.Uploader) {
-			uploader.PartSize = cfg.S3.PartSize
-			uploader.Concurrency = cfg.S3.Concurrency
-			uploader.LeavePartsOnError = false
-			uploader.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-		}),
 	}
 
 	if err := store.ensureBucket(ctx, cfg.S3.AutoCreate); err != nil {
@@ -136,24 +139,6 @@ func isAlreadyExists(err error) bool {
 	return false
 }
 
-func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, contentType, filename string) error {
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
-	if disposition == "" {
-		disposition = "attachment"
-	}
-	_, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket:             aws.String(s.bucket),
-		Key:                aws.String(key),
-		Body:               body,
-		ContentType:        aws.String(contentType),
-		ContentDisposition: aws.String(disposition),
-	})
-	if err != nil {
-		return fmt.Errorf("upload object: %w", err)
-	}
-	return nil
-}
-
 func (s *S3Store) Delete(ctx context.Context, key string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -165,16 +150,89 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s *S3Store) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, time.Time, error) {
+func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(ttl)
-	presigned, err := s.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}
+	if contentDisposition != "" {
+		input.ContentDisposition = aws.String(contentDisposition)
+	}
+	presigned, err := s.presigner.PresignPutObject(ctx, input, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("presign upload object: %w", err)
+	}
+	return presigned.URL, expiresAt, nil
+}
+
+func (s *S3Store) PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error) {
+	expiresAt := time.Now().UTC().Add(ttl)
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	}, s3.WithPresignExpires(ttl))
+	}
+	if disposition := AttachmentDisposition(filename); disposition != "" {
+		input.ResponseContentDisposition = aws.String(disposition)
+	}
+	presigned, err := s.presigner.PresignGetObject(ctx, input, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("presign object: %w", err)
 	}
 	return presigned.URL, expiresAt, nil
+}
+
+func (s *S3Store) Head(ctx context.Context, key string) (ObjectInfo, error) {
+	output, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return ObjectInfo{}, ErrNotFound
+		}
+		return ObjectInfo{}, fmt.Errorf("head object: %w", err)
+	}
+	info := ObjectInfo{Key: key}
+	if output.ContentLength != nil {
+		info.Size = *output.ContentLength
+	}
+	if output.ContentType != nil {
+		info.ContentType = *output.ContentType
+	}
+	if output.ETag != nil {
+		info.ETag = strings.Trim(*output.ETag, `"`)
+	}
+	if output.LastModified != nil {
+		info.LastModified = output.LastModified.UTC()
+	}
+	return info, nil
+}
+
+func (s *S3Store) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	var objects []ObjectInfo
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, object := range page.Contents {
+			info := ObjectInfo{Key: aws.ToString(object.Key)}
+			if object.Size != nil {
+				info.Size = *object.Size
+			}
+			if object.LastModified != nil {
+				info.LastModified = object.LastModified.UTC()
+			}
+			objects = append(objects, info)
+		}
+	}
+	return objects, nil
 }
 
 func (s *S3Store) Health(ctx context.Context) error {
@@ -185,6 +243,28 @@ func (s *S3Store) Health(ctx context.Context) error {
 		return fmt.Errorf("S3 health check: %w", err)
 	}
 	return nil
+}
+
+func isNotFound(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound", "404":
+			return true
+		}
+	}
+	return false
+}
+
+func AttachmentDisposition(filename string) string {
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if disposition == "" {
+		return "attachment"
+	}
+	return disposition
 }
 
 func s3HTTPClient() *http.Client {
