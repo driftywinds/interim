@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"interim/internal/config"
+	"interim/internal/download"
 	"interim/internal/objects"
 	"interim/internal/store"
 )
@@ -323,6 +324,39 @@ func (e *testEnv) deleteFile(t *testing.T, id, userHash, deleteToken string) int
 	}
 	response.Body.Close()
 	return response.StatusCode
+}
+
+func TestDownloadURLUsesConfiguredWorkers(t *testing.T) {
+	signer, err := download.NewSigner(
+		strings.Repeat("s", 32),
+		[]string{"https://dl1.example.test", "https://dl2.example.test"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		cfg:       config.Config{DownloadTTL: 5 * time.Minute},
+		downloads: signer,
+		now:       func() time.Time { return time.Unix(1_700_000_000, 0) },
+	}
+	file := store.File{
+		ObjectKey:    "files/abc",
+		OriginalName: "Downloads.7z",
+	}
+	first, _, err := s.downloadURL(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := s.downloadURL(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first, "https://dl1.example.test/d/v1.") {
+		t.Fatalf("first URL = %q", first)
+	}
+	if !strings.HasPrefix(second, "https://dl2.example.test/d/v1.") {
+		t.Fatalf("second URL = %q", second)
+	}
 }
 
 func TestPublicPagesAndAdminSetup(t *testing.T) {

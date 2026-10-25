@@ -85,6 +85,8 @@ func main() {
 			"upload_intent_ttl", cfg.UploadIntentTTL.String(),
 			"retention", cfg.Retention.String(),
 			"bucket", cfg.S3.Bucket,
+			"download_worker", cfg.DownloadWorkerEnabled,
+			"download_workers", len(cfg.DownloadWorkerURLs),
 		)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

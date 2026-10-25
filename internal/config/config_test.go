@@ -49,6 +49,63 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestDownloadWorkerConfig(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("DOWNLOAD_WORKER_ENABLED", "true")
+	t.Setenv("DOWNLOAD_WORKER_URLS", "https://dl1.example.test, https://dl2.example.test/")
+	t.Setenv("DOWNLOAD_WORKER_SECRET", "0123456789abcdef0123456789abcdef")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DownloadWorkerEnabled {
+		t.Fatal("download worker should be enabled")
+	}
+	if len(cfg.DownloadWorkerURLs) != 2 || cfg.DownloadWorkerURLs[0] != "https://dl1.example.test" || cfg.DownloadWorkerURLs[1] != "https://dl2.example.test" {
+		t.Fatalf("worker URLs = %v", cfg.DownloadWorkerURLs)
+	}
+	if cfg.DownloadWorkerSecret == "" {
+		t.Fatal("download worker secret is empty")
+	}
+}
+
+func TestDownloadWorkerConfigDisabledIgnoresInvalidValues(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("DOWNLOAD_WORKER_ENABLED", "false")
+	t.Setenv("DOWNLOAD_WORKER_URLS", "not a url")
+	t.Setenv("DOWNLOAD_WORKER_SECRET", "short")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DownloadWorkerEnabled || len(cfg.DownloadWorkerURLs) != 0 || cfg.DownloadWorkerSecret != "" {
+		t.Fatalf("disabled worker config = %+v", cfg)
+	}
+}
+
+func TestDownloadWorkerConfigRequiresURLsAndSecret(t *testing.T) {
+	tests := map[string]struct {
+		urls   string
+		secret string
+	}{
+		"missing URLs":   {urls: "", secret: "0123456789abcdef0123456789abcdef"},
+		"missing secret": {urls: "https://dl.example.test", secret: ""},
+		"short secret":   {urls: "https://dl.example.test", secret: "short"},
+		"URL with path":  {urls: "https://dl.example.test/base", secret: "0123456789abcdef0123456789abcdef"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			withBaseEnv(t)
+			t.Setenv("DOWNLOAD_WORKER_ENABLED", "true")
+			t.Setenv("DOWNLOAD_WORKER_URLS", tc.urls)
+			t.Setenv("DOWNLOAD_WORKER_SECRET", tc.secret)
+			if _, err := Load(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestRetentionFormats(t *testing.T) {
 	tests := map[string]time.Duration{
 		"7d":    7 * 24 * time.Hour,

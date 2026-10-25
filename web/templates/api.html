@@ -75,9 +75,9 @@
   -H 'X-Upload-Token: UPLOAD_TOKEN_FROM_RESPONSE'</code></pre>
     <p>The response is <code>{"upload_id":"…","file":{…}}</code>. Use <code>file.page_url</code> for the public download page.</p>
 
-    <h3>5. Ask for a signed download link</h3>
+    <h3>5. Ask for a download link</h3>
     <pre><code>curl -X POST {{.BaseURL}}/api/v1/files/FILE_ID/download</code></pre>
-    <p>The returned <code>url</code> is a short-lived signed S3 GET URL. Do not store it; request a new one when needed.</p>
+    <p>The returned <code>url</code> is short-lived. Depending on the instance configuration it is either a signed S3 GET URL or a worker-proxied token URL. Do not store it; request a new one when needed.</p>
 
     <h3>6. Delete a file</h3>
     <pre><code>curl -X DELETE {{.BaseURL}}/api/v1/files/FILE_ID \
@@ -168,9 +168,9 @@ Authorization: Bearer interim_...</code></pre>
     </details>
 
     <details open>
-        <summary><strong>Create a signed download link</strong> <code>POST /files/{id}/download</code></summary>
+        <summary><strong>Create a download link</strong> <code>POST /files/{id}/download</code></summary>
         <div class="endpoint">
-            <p>Public. Returns a private S3 URL signed for {{.DownloadTTL}}.</p>
+            <p>Public. Returns a short-lived download URL valid for {{.DownloadTTL}}. It is either a signed S3 URL or a worker-proxied token URL, depending on the instance configuration.</p>
             <pre><code>POST {{.APIBase}}/files/FILE_ID/download</code></pre>
             <pre><code>{
   "url": "https://storage.example/...signature...",

@@ -392,9 +392,9 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, expires, err := s.objects.PresignGet(r.Context(), file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL)
+	url, expires, err := s.downloadURL(r.Context(), file)
 	if err != nil {
-		s.logger.Error("presign download", "file_id", file.ID, "error", err)
+		s.logger.Error("create download link", "file_id", file.ID, "error", err)
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a download link.")
 		return
 	}

@@ -1,0 +1,29 @@
+name = "interim-download"
+main = "src/index.js"
+compatibility_date = "2026-10-25"
+workers_dev = false
+
+# One custom domain per deployed worker. For a second account, copy this file
+# to another local config (for example wrangler.dl2.toml), change name/pattern,
+# and deploy with `wrangler deploy --config wrangler.dl2.toml`.
+routes = [
+  { pattern = "dl1.example.com", custom_domain = true }
+]
+
+[vars]
+B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
+B2_REGION = "us-west-004"
+B2_BUCKET = "interim"
+B2_ACCESS_KEY_ID = "replace-with-read-only-key-id"
+# Restrict the worker to interim's object prefix.
+B2_KEY_PREFIX = "files/"
+# Optional: allowed browser origin for fetch()-style downloads.
+CORS_ORIGIN = "https://interim.example.com"
+
+# Secrets (set with `wrangler secret put`):
+#   B2_SECRET_ACCESS_KEY
+#   DOWNLOAD_TOKEN_SECRET
+
+# For a workers.dev URL instead of a custom domain, set:
+# workers_dev = true
+# and remove the routes block.

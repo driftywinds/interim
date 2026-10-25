@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"interim/internal/config"
+	"interim/internal/download"
 	"interim/internal/objects"
 	"interim/internal/store"
 	"interim/internal/units"
@@ -46,6 +47,7 @@ type Server struct {
 	logger    *slog.Logger
 	templates map[string]*template.Template
 	static    http.Handler
+	downloads *download.Signer
 	limiter   *rateLimiter
 	dummyHash []byte
 	now       func() time.Time
@@ -62,6 +64,14 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 		return nil, err
 	}
 
+	var downloads *download.Signer
+	if cfg.DownloadWorkerEnabled {
+		downloads, err = download.NewSigner(cfg.DownloadWorkerSecret, cfg.DownloadWorkerURLs)
+		if err != nil {
+			return nil, fmt.Errorf("configure download worker: %w", err)
+		}
+	}
+
 	s := &Server{
 		cfg:       cfg,
 		store:     st,
@@ -69,6 +79,7 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 		logger:    logger,
 		templates: templates,
 		static:    http.FileServerFS(staticFS),
+		downloads: downloads,
 		limiter:   newRateLimiter(),
 		now:       time.Now,
 	}
@@ -149,6 +160,13 @@ func (s *Server) basePage(r *http.Request, title, active string) PageData {
 		DownloadTTL:    s.cfg.DownloadTTL,
 		CurrentPath:    r.URL.Path,
 	}
+}
+
+func (s *Server) downloadURL(ctx context.Context, file store.File) (string, time.Time, error) {
+	if s.downloads != nil {
+		return s.downloads.URL(file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL, s.now().UTC())
+	}
+	return s.objects.PresignGet(ctx, file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL)
 }
 
 func (s *Server) pageURL(id string) string {

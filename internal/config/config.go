@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/joho/godotenv"
 
@@ -46,7 +47,12 @@ type Config struct {
 	DownloadTTL     time.Duration
 	UploadURLTTL    time.Duration
 	UploadIntentTTL time.Duration
-	S3              S3Config
+
+	DownloadWorkerEnabled bool
+	DownloadWorkerURLs    []string
+	DownloadWorkerSecret  string
+
+	S3 S3Config
 }
 
 type S3Config struct {
@@ -153,6 +159,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	downloadWorkerEnabled, err := parseBool("DOWNLOAD_WORKER_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	downloadWorkerURLs, downloadWorkerSecret, err := loadDownloadWorker(
+		downloadWorkerEnabled,
+		os.Getenv("DOWNLOAD_WORKER_URLS"),
+		os.Getenv("DOWNLOAD_WORKER_SECRET"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	s3, err := loadS3()
 	if err != nil {
 		return Config{}, err
@@ -166,23 +185,75 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		PublicBaseURL:   publicBaseURL,
-		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
-		DataDir:         dataDir,
-		DatabasePath:    databasePath,
-		SessionSecret:   secret,
-		SessionTTL:      sessionTTL,
-		CookieSecure:    cookieSecure,
-		TrustProxy:      trustProxy,
-		LogLevel:        logLevel,
-		Retention:       retention,
-		MaxStorage:      maxStorage,
-		MaxFileSize:     maxFileSize,
-		DownloadTTL:     downloadTTL,
-		UploadURLTTL:    uploadURLTTL,
-		UploadIntentTTL: uploadIntentTTL,
-		S3:              s3,
+		PublicBaseURL:         publicBaseURL,
+		ListenAddr:            envOr("LISTEN_ADDR", ":8080"),
+		DataDir:               dataDir,
+		DatabasePath:          databasePath,
+		SessionSecret:         secret,
+		SessionTTL:            sessionTTL,
+		CookieSecure:          cookieSecure,
+		TrustProxy:            trustProxy,
+		LogLevel:              logLevel,
+		Retention:             retention,
+		MaxStorage:            maxStorage,
+		MaxFileSize:           maxFileSize,
+		DownloadTTL:           downloadTTL,
+		UploadURLTTL:          uploadURLTTL,
+		UploadIntentTTL:       uploadIntentTTL,
+		DownloadWorkerEnabled: downloadWorkerEnabled,
+		DownloadWorkerURLs:    downloadWorkerURLs,
+		DownloadWorkerSecret:  downloadWorkerSecret,
+		S3:                    s3,
 	}, nil
+}
+
+func loadDownloadWorker(enabled bool, rawURLs, rawSecret string) ([]string, string, error) {
+	if !enabled {
+		return nil, "", nil
+	}
+
+	secret := strings.TrimSpace(rawSecret)
+	if len(secret) < 32 {
+		return nil, "", errors.New("DOWNLOAD_WORKER_SECRET must be at least 32 characters when DOWNLOAD_WORKER_ENABLED=true")
+	}
+
+	parts := strings.FieldsFunc(rawURLs, func(r rune) bool {
+		return r == ',' || r == ';' || unicode.IsSpace(r)
+	})
+	if len(parts) == 0 {
+		return nil, "", errors.New("DOWNLOAD_WORKER_URLS must contain at least one URL when DOWNLOAD_WORKER_ENABLED=true")
+	}
+
+	seen := make(map[string]struct{}, len(parts))
+	urls := make([]string, 0, len(parts))
+	for _, part := range parts {
+		parsed, err := url.Parse(strings.TrimSpace(part))
+		if err != nil {
+			return nil, "", fmt.Errorf("DOWNLOAD_WORKER_URLS: %w", err)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries must use http or https")
+		}
+		if parsed.Host == "" || parsed.User != nil {
+			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries must include a host and no credentials")
+		}
+		if parsed.Path != "" && parsed.Path != "/" {
+			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries cannot contain a path; the /d/<token> path is appended")
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries cannot contain a query or fragment")
+		}
+		base := strings.TrimSuffix(parsed.String(), "/")
+		if _, ok := seen[base]; ok {
+			continue
+		}
+		seen[base] = struct{}{}
+		urls = append(urls, base)
+	}
+	if len(urls) == 0 {
+		return nil, "", errors.New("DOWNLOAD_WORKER_URLS must contain at least one URL")
+	}
+	return urls, secret, nil
 }
 
 func loadS3() (S3Config, error) {

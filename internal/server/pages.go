@@ -81,9 +81,9 @@ func (s *Server) handlePageDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, _, err := s.objects.PresignGet(r.Context(), file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL)
+	url, _, err := s.downloadURL(r.Context(), file)
 	if err != nil {
-		s.logger.Error("presign page download", "file_id", file.ID, "error", err)
+		s.logger.Error("create page download link", "file_id", file.ID, "error", err)
 		s.renderError(w, r, http.StatusBadGateway, "Download unavailable", "The storage provider did not return a download link. Please try again.")
 		return
 	}

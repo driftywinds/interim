@@ -2,7 +2,7 @@
 
 Temporary file hosting on S3-compatible storage. Uploads are public by default,
 every file expires after the configured `RETENTION` period (7 days by default),
-and downloads are served through short-lived signed URLs from a private bucket.
+and downloads are served through short-lived URLs from a private bucket.
 
 Built in Go with SQLite metadata, a server-rendered web UI, a full REST API, and
 Docker as the primary deployment target.
@@ -15,8 +15,9 @@ Docker as the primary deployment target.
   bytes never pass through the interim server.
 - Configurable retention via `RETENTION` (default `7d`), enforced by metadata
   and a background cleanup worker.
-- Private S3 bucket. No permanent object URLs; download links are presigned and
-  expire after `DOWNLOAD_URL_TTL`.
+- Private S3 bucket. No permanent object URLs; download links are short-lived
+  (signed S3 GETs or worker-proxied token URLs) and expire after
+  `DOWNLOAD_URL_TTL`.
 - Configurable per-file and total storage caps, enforced with atomic
   reservations so concurrent uploads cannot oversubscribe capacity.
 - A janitor that runs at startup and on intervals, deleting expired upload
@@ -406,7 +407,10 @@ automatically for local runs, and Compose uses it via `env_file`.
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. |
 | `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` or the 5 GB single-PUT limit. |
 | `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry. |
-| `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. |
+| `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. Also the worker download token lifetime. |
+| `DOWNLOAD_WORKER_ENABLED` | no | `false` | Use Cloudflare Worker download URLs instead of presigned S3 GETs. |
+| `DOWNLOAD_WORKER_URLS` | worker mode yes | — | Comma/space-separated worker base URLs. The `/d/<token>` path is appended. |
+| `DOWNLOAD_WORKER_SECRET` | worker mode yes | — | At least 32 characters; must match the worker's `DOWNLOAD_TOKEN_SECRET`. |
 
 ### sss3 and other S3 servers
 
@@ -431,7 +435,8 @@ proxy; do not rewrite the signed host/path.
 
 The bucket should be private. The browser receives a PUT URL scoped to one
 object key and a short expiry. interim sets `Content-Disposition: attachment`
-through the signed PUT headers and also adds a response override to signed GETs.
+through the signed PUT headers; in S3 download mode it also adds a response
+override to signed GETs. In worker mode the Worker sets the response header.
 
 ### sss3 behind Cloudflare
 
@@ -484,6 +489,59 @@ Set both `S3_ENDPOINT` and `S3_PUBLIC_ENDPOINT` to the public Caddy hostname
 region `us-east-1`, and use a dedicated bucket. Cloudflare cannot raise its
 request-body limit, so large-file support requires a non-proxied endpoint or a
 different upload design.
+
+### B2 private bucket with Cloudflare Worker downloads
+
+For Backblaze B2, downloads can be proxied by a Cloudflare Worker so B2 →
+Cloudflare traffic is covered by the Bandwidth Alliance while the bucket stays
+private. The Worker must stream the bytes; a Worker that only signs a B2 URL and
+redirects does not get the free-egress treatment.
+
+```text
+browser -> interim /files/{id}/download
+        -> 303 https://dl1.example.com/d/<token>
+        -> Cloudflare Worker
+        -> private B2 object
+        -> browser
+```
+
+Uploads still go directly to B2 with presigned PUTs, so the Cloudflare 100 MB
+request-body limit does not apply to uploads.
+
+Configure interim:
+
+```dotenv
+DOWNLOAD_WORKER_ENABLED=true
+DOWNLOAD_WORKER_URLS=https://dl1.example.com,https://dl2.example.com
+DOWNLOAD_WORKER_SECRET=replace-with-at-least-32-random-characters
+
+S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+S3_PUBLIC_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+S3_REGION=us-west-004
+S3_BUCKET=interim
+S3_FORCE_PATH_STYLE=true
+S3_AUTO_CREATE_BUCKET=false
+```
+
+- `DOWNLOAD_WORKER_ENABLED=false` keeps the existing presigned S3 GET behavior.
+- `DOWNLOAD_WORKER_URLS` is rotated for new download links. All workers must
+  share the same `DOWNLOAD_WORKER_SECRET` and read the same private B2 bucket.
+- The token includes the object key, filename, and expiry. The Worker verifies
+  it, signs a path-style B2 request, and streams the response.
+- The Worker sets `Cache-Control: private, no-store`; do not cache tokenized
+  downloads.
+- `S3_PUBLIC_ENDPOINT` remains the B2 endpoint for uploads, not the Worker.
+- The Worker sets `Content-Disposition`, supports `HEAD`, and forwards `Range`
+  so large downloads can resume.
+
+Deploy the Worker from [worker/README.md](worker/README.md). It includes the
+wrangler config, read-only B2 key scope, custom-domain setup, and the
+multi-account/multi-URL deployment notes.
+
+Cloudflare's free Worker allowance is per account, not per Worker. Multiple
+Worker URLs are useful for separate deployments or redundancy, but using extra
+accounts to evade the free allowance is a terms-of-service risk. Cloudflare's
+large-file/video delivery policy still applies to the download domain.
 
 ### Required bucket CORS
 
@@ -606,7 +664,7 @@ curl -X PUT 'SIGNED_S3_URL' \
 curl -X POST 'COMPLETE_URL' \
   -H 'X-Upload-Token: UPLOAD_TOKEN'
 
-# Get a signed download URL (expires after DOWNLOAD_URL_TTL)
+# Get a download URL (expires after DOWNLOAD_URL_TTL)
 curl -X POST https://files.example.com/api/v1/files/FILE_ID/download
 
 # Delete with the owning user hash
@@ -630,7 +688,7 @@ SHA-256 hashes.
 | `DELETE` | `/api/v1/uploads/{id}` | upload token | Abort a pending upload and release quota. |
 | `GET` | `/api/v1/files` | bearer | List the caller's active files. |
 | `GET` | `/api/v1/files/{id}` | no | Public metadata. |
-| `POST` | `/api/v1/files/{id}/download` | no | Short-lived signed URL. |
+| `POST` | `/api/v1/files/{id}/download` | no | Short-lived download URL. |
 | `DELETE` | `/api/v1/files/{id}` | bearer or token | Delete. |
 | `GET` | `/api/v1/status` | no | Capacity and retention status. |
 
@@ -651,7 +709,7 @@ Clearing site data loses the local delete ability, but the file still expires
 after the configured `RETENTION` period and the admin can delete it.
 
 The download page never receives or displays the delete token. Its download
-button links to a server endpoint that creates a fresh presigned GET and
+button links to a server endpoint that creates a fresh download link and
 redirects to it. Direct object URLs do not exist in the HTML.
 
 ## Admin
@@ -696,8 +754,8 @@ CGO_ENABLED=0 go build -trimpath -o bin/interim ./cmd/interim
   `PUBLIC_BASE_URL` to the HTTPS origin. Set `TRUST_PROXY=true` only when the
   proxy is trusted; it is needed for correct client-IP rate limiting.
 - The S3 bucket must be browser-reachable at `S3_PUBLIC_ENDPOINT`, with the CORS
-  policy shown above. The bucket itself stays private; only signed PUT/GET URLs
-  are exposed.
+  policy shown above. The bucket itself stays private; only presigned PUTs and
+  short-lived download URLs are exposed.
 - Run one instance per SQLite database. The reservation and intent state
   machines rely on SQLite's single-writer behaviour.
 - Use a dedicated `S3_OBJECT_PREFIX`. The janitor treats objects under that
@@ -715,7 +773,8 @@ CGO_ENABLED=0 go build -trimpath -o bin/interim ./cmd/interim
   key.
 - Direct uploads are scoped to one object key and expire quickly; upload tokens
   are one-time and never placed in URLs.
-- Download links are short-lived signed S3 GETs; objects are private.
+- Download links are short-lived signed S3 GETs or worker-proxied token URLs;
+  objects are private.
 - User hashes, upload tokens, and delete tokens are hashed at rest.
 - Uploads are capped and capacity-reserved before signing. Actual object size is
   verified with `HeadObject` before a file is committed.

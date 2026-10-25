@@ -7,7 +7,8 @@ info:
     configured retention period (7 days by default). Uploads are direct to
     S3-compatible storage: interim reserves quota and signs a short-lived PUT
     URL, the client uploads the bytes, then interim verifies the object and
-    commits the file record. Download URLs are short-lived signed S3 URLs.
+    commits the file record. Download URLs are short-lived: either signed S3
+    GET URLs or worker-proxied token URLs, depending on the instance.
   contact:
     name: interim
 servers:
@@ -305,12 +306,12 @@ paths:
     post:
       tags: [Files]
       operationId: createDownloadLink
-      summary: Create a short-lived signed download URL
+      summary: Create a short-lived download URL
       parameters:
         - $ref: "#/components/parameters/FileID"
       responses:
         "200":
-          description: A presigned S3 GET URL.
+          description: A short-lived signed S3 GET URL or worker-proxied token URL.
           content:
             application/json:
               schema:
@@ -505,7 +506,7 @@ components:
         url:
           type: string
           format: uri
-          description: Short-lived signed S3 URL.
+          description: Short-lived signed S3 URL or worker-proxied token URL.
         filename:
           type: string
         expires_at:
