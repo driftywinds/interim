@@ -19,7 +19,6 @@
         <ul>
             <li>{{if eq .Active "home"}}<span>Index</span>{{else}}<a href="/">Index</a>{{end}}</li>
             <li>{{if eq .Active "api"}}<span>API</span>{{else}}<a href="/api">API</a>{{end}}</li>
-            <li>{{if eq .Active "admin"}}<span>Admin</span>{{else}}<a href="/admin">Admin</a>{{end}}</li>
         </ul>
     </nav>
 </header>
@@ -31,7 +30,7 @@
 
 <footer class="site-foot">
     <p><strong>interim</strong> — no accounts, no permanence. Files are permanently deleted after {{.RetentionLabel}}.</p>
-    <p><a href="/api">API documentation</a> · <a href="/admin">Admin</a></p>
+    <p><a href="/api">API documentation</a></p>
 </footer>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

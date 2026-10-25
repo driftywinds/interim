@@ -382,6 +382,17 @@ legend {
     background: var(--fg);
 }
 
+.storage-donate {
+    margin: 10px 0 0;
+    padding: 8px 12px;
+    border-left: 3px solid var(--accent);
+    background: var(--notice-bg);
+}
+
+.storage-donate a {
+    font-weight: 700;
+}
+
 .history,
 .user-hash,
 .features {

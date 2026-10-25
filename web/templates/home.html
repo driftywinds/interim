@@ -37,6 +37,10 @@
         <span class="muted">(<span id="storage-percent">{{pct .Status.UsedPercent}}</span>%)</span>
     </p>
     <progress id="storage-progress" class="storage-progress" max="100" value="{{pct .Status.UsedPercent}}">{{pct .Status.UsedPercent}}%</progress>
+    <p class="storage-donate">
+        Want to support development and increase this limit?
+        <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
+    </p>
     <p class="muted" id="storage-detail">
         <span id="storage-available">{{bytes .Status.Available}}</span> available<span id="storage-reserved">{{if gt .Status.Reserved 0}} · {{bytes .Status.Reserved}} reserved by active uploads{{end}}</span>
         · capacity is enforced by the server
