@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
 
 	"interim/internal/config"
 )
@@ -80,6 +81,15 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 			options.DisableMultiRegionAccessPoints = true
 			options.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 			options.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+			// The Go SDK adds "Accept-Encoding: identity" and signs it. Some S3
+			// implementations (and Cloudflare in front of them) normalize or
+			// strip that header, which produces a SignatureDoesNotMatch. Remove
+			// the middleware and disable transport compression instead, so no
+			// Accept-Encoding header is sent at all.
+			options.APIOptions = append(options.APIOptions, func(stack *middleware.Stack) error {
+				_, _ = stack.Finalize.Remove("DisableAcceptEncodingGzip")
+				return nil
+			})
 		})
 	}
 
@@ -278,6 +288,7 @@ func s3HTTPClient() *http.Client {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 16
+	transport.DisableCompression = true
 	return &http.Client{Transport: transport}
 }
 
