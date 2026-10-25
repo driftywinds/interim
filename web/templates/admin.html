@@ -1,0 +1,121 @@
+{{define "page"}}
+<nav class="admin-nav" aria-label="Admin sections">
+    <a href="#files">Files</a>
+    <a href="#keys">User hashes</a>
+    <span class="admin-who">Signed in as <strong>{{.AdminName}}</strong></span>
+    <form method="post" action="/admin/logout" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button type="submit" class="link-button">Logout</button>
+    </form>
+</nav>
+
+<fieldset class="admin-section">
+    <legend>Storage</legend>
+    <div class="stat-grid">
+        <div><h3>Files</h3><div class="stat">{{.Usage.Files}}</div><span class="muted">stored objects</span></div>
+        <div><h3>Used</h3><div class="stat">{{bytes .Usage.Used}}</div><span class="muted">{{pct .Percent}}% of cap</span></div>
+        <div><h3>Reserved</h3><div class="stat">{{bytes .Usage.Reserved}}</div><span class="muted">active uploads</span></div>
+        <div><h3>Limit</h3><div class="stat">{{bytes .MaxStorage}}</div><span class="muted">MAX_STORAGE</span></div>
+    </div>
+    <progress class="storage-progress" max="100" value="{{pct .Percent}}">{{pct .Percent}}%</progress>
+    {{if ge .Percent 100.0}}<p class="warn-text">Storage is at capacity. New uploads are paused.</p>{{end}}
+</fieldset>
+
+<fieldset class="admin-section" id="files">
+    <legend>All files</legend>
+    <form method="get" action="/admin" class="search-form">
+        <label for="q">Search</label>
+        <input type="search" id="q" name="q" value="{{.Query}}" placeholder="filename or file ID" maxlength="200">
+        <button type="submit">Search</button>
+        {{if .Query}}<a href="/admin">Clear</a>{{end}}
+        <span class="muted">{{.Total}} file(s)</span>
+    </form>
+
+    <form method="post" action="/admin/files/delete" id="bulk-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <div class="table-wrap">
+            <table class="fs admin-table">
+                <thead>
+                <tr>
+                    <th><input type="checkbox" id="select-all" aria-label="Select all files"></th>
+                    <th>File</th>
+                    <th>Size</th>
+                    <th>Uploader</th>
+                    <th>Created</th>
+                    <th>Expires</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                {{range .Files}}
+                    <tr{{if .ExpiresAt.Before $.Now}} class="expired-row"{{end}}>
+                        <td><input type="checkbox" name="ids" value="{{.ID}}" aria-label="Select {{.OriginalName}}"></td>
+                        <td class="wide-cell">
+                            <a href="/f/{{.ID}}" target="_blank" rel="noopener">{{.OriginalName}}</a>
+                            <div class="muted"><code>{{.ID}}</code></div>
+                        </td>
+                        <td>{{bytes .Size}}</td>
+                        <td>{{if .KeyPrefix}}<code>{{maskPrefix .KeyPrefix}}</code>{{else}}<span class="muted">anonymous</span>{{end}}</td>
+                        <td>{{date .CreatedAt}}</td>
+                        <td>{{if .ExpiresAt.Before $.Now}}<span class="text-danger">expired</span>{{else}}{{datetime .ExpiresAt}}{{end}}</td>
+                        <td>
+                            <div class="row-actions">
+                                <a href="/f/{{.ID}}" target="_blank" rel="noopener">Open</a>
+                                <button type="button" class="link-button delete-one" data-id="{{.ID}}">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                {{else}}
+                    <tr><td colspan="7" class="muted">No files found.</td></tr>
+                {{end}}
+                </tbody>
+            </table>
+        </div>
+        <div class="bulk-actions">
+            <button type="submit" id="delete-selected" disabled>Delete selected</button>
+            <span class="muted" id="selected-count">0 selected</span>
+        </div>
+    </form>
+
+    {{if or .PrevURL .NextURL}}
+    <nav class="pagination" aria-label="File pages">
+        {{if .PrevURL}}<a href="{{.PrevURL}}">← Previous</a>{{end}}
+        <span>Page {{.Page}} of {{.Pages}}</span>
+        {{if .NextURL}}<a href="{{.NextURL}}">Next →</a>{{end}}
+    </nav>
+    {{end}}
+</fieldset>
+
+<fieldset class="admin-section" id="keys">
+    <legend>User hashes</legend>
+    <p class="muted">Only prefixes are stored for display. Raw hashes cannot be recovered by anyone, including the admin.</p>
+    <div class="table-wrap">
+        <table class="fs admin-table">
+            <thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th>Files</th><th>Bytes</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+            {{range .Keys}}
+                <tr>
+                    <td><code>{{.Prefix}}…</code></td>
+                    <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">—</span>{{end}}</td>
+                    <td>{{date .CreatedAt}}</td>
+                    <td>{{if .LastUsedAt}}{{datetime .LastUsedAt}}{{else}}<span class="muted">never</span>{{end}}</td>
+                    <td>{{.FileCount}}</td>
+                    <td>{{bytes .FileBytes}}</td>
+                    <td>{{if .Disabled}}<span class="text-danger">revoked</span>{{else}}active{{end}}</td>
+                    <td>
+                        <form method="post" action="/admin/keys/revoke" class="inline-form" data-confirm="{{if .Disabled}}Restore this user hash?{{else}}Revoke this user hash? Existing files remain, but the hash can no longer authenticate.{{end}}">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                            <input type="hidden" name="id" value="{{.ID}}">
+                            <input type="hidden" name="action" value="{{if .Disabled}}restore{{else}}revoke{{end}}">
+                            <button type="submit" class="link-button">{{if .Disabled}}Restore{{else}}Revoke{{end}}</button>
+                        </form>
+                    </td>
+                </tr>
+            {{else}}
+                <tr><td colspan="8" class="muted">No user hashes have been created.</td></tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+</fieldset>
+{{end}}

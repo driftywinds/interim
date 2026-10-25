@@ -1,0 +1,8 @@
+{{define "page"}}
+<div class="error-panel">
+    <p class="error-code">{{.StatusCode}}</p>
+    <h2>{{.Heading}}</h2>
+    <p>{{.Message}}</p>
+    <p><a href="/">Return to the index</a> · <a href="/api">API documentation</a></p>
+</div>
+{{end}}

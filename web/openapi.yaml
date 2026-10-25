@@ -1,0 +1,435 @@
+openapi: 3.1.0
+info:
+  title: interim API
+  version: 1.0.0
+  description: |
+    interim is a temporary file host. Every file is permanently deleted after
+    the instance's configured retention period (7 days by default). Uploads are
+    anonymous by default; user hashes act as bearer credentials for API clients.
+    Download URLs are short-lived signed S3 URLs and are never permanent.
+  contact:
+    name: interim
+servers:
+  - url: __BASE_URL__
+    description: Public interim instance
+tags:
+  - name: Auth
+    description: User hashes used as API credentials.
+  - name: Files
+    description: Upload, inspect, download, and delete files.
+  - name: System
+    description: Public service status.
+paths:
+  /api/v1/status:
+    get:
+      tags: [System]
+      operationId: getStatus
+      summary: Get storage and upload status
+      responses:
+        "200":
+          description: Current service status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /api/v1/keys:
+    post:
+      tags: [Auth]
+      operationId: createUserHash
+      summary: Create a user hash
+      description: Creates a bearer credential. The raw hash is returned once and never stored in plaintext.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 64
+      responses:
+        "201":
+          description: User hash created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedKey"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/keys/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentKey
+      summary: Get current user hash details
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Key prefix and usage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/files:
+    post:
+      tags: [Files]
+      operationId: uploadFile
+      summary: Upload one file
+      description: |
+        Uploads a single file as multipart/form-data. Authentication is optional.
+        Send X-File-Size with the exact file size. If X-File-Size is absent, a
+        Content-Length request body is required.
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: File uploaded. delete_token is shown only in this response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadedFile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: File exceeds MAX_FILE_SIZE.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          description: Storage is at capacity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      tags: [Files]
+      operationId: listFiles
+      summary: List the current user hash's active files
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: A page of files.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files, pagination]
+                properties:
+                  files:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/File"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/files/{id}:
+    get:
+      tags: [Files]
+      operationId: getFileMetadata
+      summary: Get public file metadata
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: File metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/File"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Gone"
+    delete:
+      tags: [Files]
+      operationId: deleteFile
+      summary: Delete a file
+      description: |
+        Requires either the owning user hash or the one-time per-file
+        X-Delete-Token returned by upload.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: X-Delete-Token
+          in: header
+          required: false
+          schema:
+            type: string
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        "204":
+          description: File deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Invalid delete token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Gone"
+  /api/v1/files/{id}/download:
+    post:
+      tags: [Files]
+      operationId: createDownloadLink
+      summary: Create a short-lived signed download URL
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: A presigned S3 GET URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadLink"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Gone"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "A user hash in the form interim_..."
+  parameters:
+    FileID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: Missing or invalid user hash.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: File or endpoint not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Gone:
+      description: The configured retention period has ended.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    File:
+      type: object
+      required: [id, name, size, content_type, created_at, expires_at, expires_in_seconds, page_url, api_url, owner]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        size:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        expires_in_seconds:
+          type: integer
+          format: int64
+        page_url:
+          type: string
+          format: uri
+        api_url:
+          type: string
+          format: uri
+        owner:
+          type: string
+          enum: [anonymous, user_hash]
+    UploadedFile:
+      allOf:
+        - $ref: "#/components/schemas/File"
+        - type: object
+          required: [delete_token, delete_token_header, warning]
+          properties:
+            delete_token:
+              type: string
+              description: Shown once. Required to delete an anonymous upload.
+            delete_token_header:
+              type: string
+              const: X-Delete-Token
+            warning:
+              type: string
+    CreatedKey:
+      type: object
+      required: [id, user_hash, key_prefix, created_at, warning]
+      properties:
+        id:
+          type: string
+        user_hash:
+          type: string
+          description: Raw bearer credential. Returned once.
+        key_prefix:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        warning:
+          type: string
+    KeyInfo:
+      type: object
+      required: [id, key_prefix, created_at, files, bytes]
+      properties:
+        id:
+          type: string
+        key_prefix:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        files:
+          type: integer
+        bytes:
+          type: integer
+          format: int64
+    DownloadLink:
+      type: object
+      required: [url, filename, expires_at]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Short-lived signed S3 URL.
+        filename:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    Pagination:
+      type: object
+      required: [total, limit, offset, has_more]
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        has_more:
+          type: boolean
+    Status:
+      type: object
+      required: [accepting_uploads, storage, retention_seconds, retention_human, max_file_size_bytes, download_url_ttl_seconds, server_time]
+      properties:
+        accepting_uploads:
+          type: boolean
+        storage:
+          type: object
+          required: [files, used_bytes, reserved_bytes, limit_bytes, available_bytes, used_percent]
+          properties:
+            files:
+              type: integer
+            used_bytes:
+              type: integer
+              format: int64
+            reserved_bytes:
+              type: integer
+              format: int64
+            limit_bytes:
+              type: integer
+              format: int64
+            available_bytes:
+              type: integer
+              format: int64
+            used_percent:
+              type: number
+              format: double
+        retention_seconds:
+          type: integer
+          format: int64
+          description: Configured lifetime of newly uploaded files, in seconds.
+        retention_human:
+          type: string
+          description: Human-readable retention label, for example "7 days".
+        max_file_size_bytes:
+          type: integer
+          format: int64
+        download_url_ttl_seconds:
+          type: integer
+          format: int64
+        server_time:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string

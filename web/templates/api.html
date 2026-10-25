@@ -1,0 +1,171 @@
+{{define "page"}}
+<div class="api-docs">
+    <p class="lede">Tools to interact with interim programmatically. The API is versioned, JSON-first, and available at <code>{{.APIBase}}</code>.</p>
+    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. Storage is capped at {{.MaxStorage}}; uploads are rejected with HTTP 507 when full.</p>
+
+    <nav class="docs-toc" aria-label="API sections">
+        <a href="#overview">Overview</a>
+        <a href="#authentication">Authentication</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#endpoints">Endpoints</a>
+        <a href="#errors">Errors</a>
+        <a href="{{.OpenAPIJSON}}">OpenAPI JSON</a>
+        <a href="{{.OpenAPIYAML}}">YAML</a>
+    </nav>
+
+    <h2 id="overview">Overview</h2>
+    <p><strong>Base URL:</strong> <code>{{.APIBase}}</code></p>
+    <p>Uploads are multipart/form-data requests. Anonymous uploads are allowed. A user hash identifies an API client and lets it list and delete its own files. Every response is JSON, except <code>DELETE</code>, which returns <code>204 No Content</code>.</p>
+    <p><strong>Retention:</strong> {{.RetentionLabel}} per file, configured by this instance's operator. <strong>Per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed URL lifetime:</strong> {{.DownloadTTL}}.</p>
+
+    <h2 id="authentication">Authentication</h2>
+    <p>Create a user hash with <code>POST /keys</code>. It is returned once. Send it on every authenticated request:</p>
+    <pre><code>Authorization: Bearer interim_...</code></pre>
+    <p><code>X-API-Key: interim_...</code> is also accepted. Anonymous upload and public metadata/download endpoints do not require a hash. An invalid supplied hash is always rejected.</p>
+    <p><strong>Lost hashes cannot be recovered.</strong> Only a SHA-256 hash is stored on the server.</p>
+
+    <h2 id="quickstart">Quickstart</h2>
+    <h3>1. Create a user hash</h3>
+    <pre><code>curl -X POST {{.BaseURL}}/api/v1/keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-cli"}'</code></pre>
+    <h3>2. Upload a file</h3>
+    <pre><code>curl -X POST {{.BaseURL}}/api/v1/files \
+  -H 'Authorization: Bearer interim_...' \
+  -H 'X-File-Size: 12345' \
+  -F 'file=@sample.bin'</code></pre>
+    <p>The response includes <code>id</code>, <code>page_url</code>, <code>expires_at</code>, and a one-time <code>delete_token</code>. Keep the delete token if you uploaded anonymously.</p>
+
+    <h3>3. Ask for a signed download link</h3>
+    <pre><code>curl -X POST {{.BaseURL}}/api/v1/files/FILE_ID/download</code></pre>
+    <p>The returned <code>url</code> is a short-lived signed S3 URL. Do not store it; request a new one when needed.</p>
+
+    <h3>4. Delete a file</h3>
+    <pre><code>curl -X DELETE {{.BaseURL}}/api/v1/files/FILE_ID \
+  -H 'Authorization: Bearer interim_...'</code></pre>
+    <p>Anonymous uploads are deleted with the per-file token:</p>
+    <pre><code>curl -X DELETE {{.BaseURL}}/api/v1/files/FILE_ID \
+  -H 'X-Delete-Token: THE_TOKEN_FROM_UPLOAD'</code></pre>
+
+    <h2 id="endpoints">Endpoints</h2>
+
+    <details open>
+        <summary><strong>Create a user hash</strong> <code>POST /keys</code></summary>
+        <div class="endpoint">
+            <p>Creates an API credential. No authentication required. Subject to per-IP rate limits.</p>
+            <pre><code>POST {{.APIBase}}/keys
+Content-Type: application/json
+
+{"name":"optional label"}</code></pre>
+            <pre><code>HTTP/1.1 201 Created
+{
+  "id": "…",
+  "user_hash": "interim_…",
+  "key_prefix": "interim_…",
+  "created_at": "2026-10-25T09:00:00Z",
+  "warning": "Save this user hash now. It is shown once and cannot be recovered."
+}</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Get current user hash</strong> <code>GET /keys/me</code></summary>
+        <div class="endpoint">
+            <p>Requires a bearer user hash. Returns the key prefix and usage counts.</p>
+            <pre><code>GET {{.APIBase}}/keys/me
+Authorization: Bearer interim_...</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Upload a file</strong> <code>POST /files</code></summary>
+        <div class="endpoint">
+            <p>Multipart field name: <code>file</code>. Authentication is optional. Send <code>X-File-Size</code> with the exact byte size; without it, a Content-Length request body is required.</p>
+            <pre><code>POST {{.APIBase}}/files
+Authorization: Bearer interim_...      # optional
+X-File-Size: 12345                     # recommended
+Content-Type: multipart/form-data
+
+file=@sample.bin</code></pre>
+            <p>Possible errors: <code>413 file_too_large</code>, <code>507 storage_full</code>, <code>502 storage_error</code>.</p>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>List your files</strong> <code>GET /files</code></summary>
+        <div class="endpoint">
+            <p>Requires a bearer user hash. Returns only that hash's active files. Query: <code>limit</code> (1–100) and <code>offset</code>.</p>
+            <pre><code>GET {{.APIBase}}/files?limit=50&amp;offset=0
+Authorization: Bearer interim_...</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary id="get-file-metadata"><strong>Get file metadata</strong> <code>GET /files/{id}</code></summary>
+        <div class="endpoint">
+            <p>Public. Includes the page URL, size, content type, creation time, and expiry. It never exposes the object key or delete token.</p>
+            <pre><code>GET {{.APIBase}}/files/FILE_ID</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Create a signed download link</strong> <code>POST /files/{id}/download</code></summary>
+        <div class="endpoint">
+            <p>Public. Returns a private S3 URL signed for {{.DownloadTTL}}.</p>
+            <pre><code>POST {{.APIBase}}/files/FILE_ID/download</code></pre>
+            <pre><code>{
+  "url": "https://storage.example/...signature...",
+  "filename": "sample.bin",
+  "expires_at": "2026-10-25T09:05:00Z"
+}</code></pre>
+            <p>Expired files return <code>410 Gone</code>. Do not cache or redistribute signed URLs.</p>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Delete a file</strong> <code>DELETE /files/{id}</code></summary>
+        <div class="endpoint">
+            <p>Requires either the owning user hash or the per-file delete token. Returns <code>204</code> on success.</p>
+            <pre><code>DELETE {{.APIBase}}/files/FILE_ID
+Authorization: Bearer interim_...
+# or
+X-Delete-Token: token_from_upload</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Storage status</strong> <code>GET /status</code></summary>
+        <div class="endpoint">
+            <p>Public. Reports whether uploads are currently accepted, used/reserved bytes, the configured cap, retention, and per-file limit.</p>
+            <pre><code>GET {{.APIBase}}/status</code></pre>
+        </div>
+    </details>
+
+    <h2 id="errors">Errors and limits</h2>
+    <table class="fs">
+        <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
+        <tbody>
+        <tr><td>400</td><td><code>invalid_request</code></td><td>Malformed JSON, form, or upload.</td></tr>
+        <tr><td>401</td><td><code>unauthorized</code></td><td>Missing or invalid user hash.</td></tr>
+        <tr><td>403</td><td><code>forbidden</code></td><td>Invalid per-file delete token.</td></tr>
+        <tr><td>404</td><td><code>not_found</code></td><td>Unknown file or endpoint.</td></tr>
+        <tr><td>410</td><td><code>expired</code></td><td>The configured retention period has ended.</td></tr>
+        <tr><td>413</td><td><code>file_too_large</code></td><td>Exceeds the per-file cap.</td></tr>
+        <tr><td>429</td><td><code>rate_limited</code></td><td>Too many requests; check <code>Retry-After</code>.</td></tr>
+        <tr><td>507</td><td><code>storage_full</code></td><td>No storage capacity available.</td></tr>
+        </tbody>
+    </table>
+    <p>Errors use a single envelope:</p>
+    <pre><code>{
+  "error": {
+    "code": "storage_full",
+    "message": "Storage maxed out — please try again later.",
+    "request_id": "…"
+  }
+}</code></pre>
+    <p>Send <code>X-Request-ID</code> in bug reports; the server also returns one on every response. API responses are <code>Cache-Control: no-store</code>.</p>
+
+    <h2>OpenAPI</h2>
+    <p>Machine-readable API description: <a href="{{.OpenAPIJSON}}">JSON</a> · <a href="{{.OpenAPIYAML}}">YAML</a>. The server URL is generated from <code>PUBLIC_BASE_URL</code>.</p>
+</div>
+{{end}}

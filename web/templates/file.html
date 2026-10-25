@@ -1,0 +1,36 @@
+{{define "page"}}
+<div class="download-panel">
+    <p class="file-name">{{.Name}}</p>
+    {{if .IsExpired}}
+        <p class="file-meta">{{bytes .Size}} · uploaded {{date .CreatedAt}} · expired {{datetime .ExpiresAt}}</p>
+        <div class="warn">
+            <p class="lede">Whatever lived here has returned to the void.</p>
+            <p>This file was permanently deleted after {{.RetentionLabel}}. There is no recovery, no backup, and no point in refreshing.</p>
+        </div>
+        <p class="download-back"><a href="/">Upload a new file</a></p>
+    {{else}}
+        <p class="file-meta">{{bytes .Size}} · uploaded {{date .CreatedAt}} · expires {{datetime .ExpiresAt}}</p>
+        <p class="countdown" data-countdown data-expires="{{.ExpiresUnix}}">Deleted in <span id="countdown-value">{{.ExpiresIn}}</span></p>
+
+        <div class="download-row">
+            <a href="/f/{{.ID}}/download" class="download-btn" id="download-button">Download File <span class="size">{{bytes .Size}}</span></a>
+            <div class="download-links">
+                <button type="button" class="link-button" data-copy="{{.PageURL}}">Copy download page link</button>
+                <a href="/api#get-file-metadata">API details</a>
+            </div>
+        </div>
+
+        <p class="download-note">The download button asks the server for a signed S3 link that expires after {{.DownloadTTL}}. The bucket is private, so the file cannot be hotlinked.</p>
+
+        <div class="warn">
+            <p class="lede">All downloads happen from this page.</p>
+            <p>There are no direct object URLs and no permanent links. If a link works after {{.DownloadTTL}}, it did not come from us.</p>
+            <ul>
+                <li>The file is deleted automatically after {{.RetentionLabel}}.</li>
+                <li>If you need it later, download it now.</li>
+                <li>Links are generated per click and expire quickly.</li>
+            </ul>
+        </div>
+    {{end}}
+</div>
+{{end}}

@@ -1,0 +1,79 @@
+{{define "page"}}
+<p class="lede">interim is a fast, minimal temporary file host. Upload anonymously or bring your own user hash.</p>
+
+<div class="expiry-notice" role="note">
+    <strong>Every file is permanently deleted after {{.RetentionLabel}}.</strong>
+    There are no extensions and no recovery. Download what you need before the deadline.
+</div>
+
+<div id="storage-full" class="warn" role="alert"{{if .Status.Accepting}} hidden{{end}}>
+    <p class="lede">Storage maxed out — please try again later.</p>
+    <p>Uploads are paused until existing files expire or are deleted.</p>
+</div>
+
+<div id="upload-app"
+     data-status-url="/api/v1/status"
+     data-upload-url="/api/v1/files"
+     data-max-file-size="{{.Status.MaxFileSize}}"
+     data-accepting="{{if .Status.Accepting}}true{{else}}false{{end}}">
+    <div id="drop-zone" class="upload-zone">
+        <input type="file" id="file-input" name="file" multiple>
+        <span class="hint">Drop files here · up to {{bytes .Status.MaxFileSize}} per file</span>
+    </div>
+
+    <div class="upload-actions">
+        <button type="button" id="upload-button"{{if not .Status.Accepting}} disabled{{end}}>Upload</button>
+        <button type="button" id="cancel-button" disabled>Cancel</button>
+        <button type="button" id="copy-links" disabled>Copy links</button>
+    </div>
+    <p id="upload-error" class="form-error" role="alert" hidden></p>
+    <ul id="upload-queue" class="upload-queue" hidden></ul>
+</div>
+
+<fieldset class="storage-panel">
+    <legend>Storage</legend>
+    <p class="storage-numbers">
+        <strong id="storage-used">{{bytes .Status.Used}}</strong> used of <strong id="storage-limit">{{bytes .Status.Limit}}</strong>
+        <span class="muted">(<span id="storage-percent">{{pct .Status.UsedPercent}}</span>%)</span>
+    </p>
+    <progress id="storage-progress" class="storage-progress" max="100" value="{{pct .Status.UsedPercent}}">{{pct .Status.UsedPercent}}%</progress>
+    <p class="muted" id="storage-detail">
+        <span id="storage-available">{{bytes .Status.Available}}</span> available<span id="storage-reserved">{{if gt .Status.Reserved 0}} · {{bytes .Status.Reserved}} reserved by active uploads{{end}}</span>
+        · capacity is enforced by the server
+    </p>
+</fieldset>
+
+<section class="history" aria-labelledby="history-title">
+    <h2 id="history-title">Your uploads in this browser</h2>
+    <p class="muted">This list lives only in this browser. Delete tokens are stored locally and never shown on the download page.</p>
+    <table class="fs" id="local-table">
+        <thead>
+        <tr><th>File</th><th>Size</th><th>Expires</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="local-uploads"></tbody>
+    </table>
+    <p id="local-empty" class="muted">Nothing here yet. Uploads made in this browser will appear here.</p>
+</section>
+
+<section class="user-hash" aria-labelledby="hash-title">
+    <h2 id="hash-title">User hash</h2>
+    <p>A user hash is your API key. It lets you upload, list, and delete files through the API. Keep it secret.</p>
+    <div class="inline-actions">
+        <button type="button" id="create-user-hash">Create user hash</button>
+        <a href="/api">Read the API docs</a>
+    </div>
+    <pre id="hash-result" class="hash-result" hidden><code id="hash-value"></code></pre>
+    <p id="hash-warning" class="warn-text" hidden>Save this hash now — it is shown once and cannot be recovered.</p>
+</section>
+
+<section class="features">
+    <h2>Our main features include</h2>
+    <ul>
+        <li>No account needed. Uploads are public and anonymous by default.</li>
+        <li>A hard expiry period of {{.RetentionLabel}}. No permanent storage.</li>
+        <li>Private S3 bucket, signed download links, no hotlinking.</li>
+        <li>A strict storage cap so the server never oversubscribes.</li>
+        <li>Per-browser upload history with local delete tokens.</li>
+    </ul>
+</section>
+{{end}}

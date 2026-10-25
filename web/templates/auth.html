@@ -1,0 +1,33 @@
+{{define "page"}}
+<div class="auth-panel">
+    {{if eq .Mode "setup"}}
+        <h2>First-run setup</h2>
+        <p>Create the single admin account for this interim instance. This page is only available until the account exists.</p>
+        {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+        <form method="post" action="/setup">
+            <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+            <label for="username">Admin username</label>
+            <input type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]{3,32}" autofocus>
+            <p class="field-hint">3–32 characters: letters, numbers, dots, underscores, or dashes.</p>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="new-password" required minlength="10" maxlength="72">
+            <p class="field-hint">At least 10 characters. Store it securely; there is no password-reset flow.</p>
+            <label for="password_confirm">Confirm password</label>
+            <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="10" maxlength="72">
+            <button type="submit">Create admin</button>
+        </form>
+    {{else}}
+        <h2>Admin login</h2>
+        <p>The admin console is protected by the credentials created on first run.</p>
+        {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+        <form method="post" action="/admin/login">
+            <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" required autofocus>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" required>
+            <button type="submit">Login</button>
+        </form>
+    {{end}}
+</div>
+{{end}}

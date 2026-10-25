@@ -1,0 +1,142 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+)
+
+func (s *Store) CreateAPIKey(ctx context.Context, key APIKey) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		key.ID, key.KeyHash, key.Prefix, key.Name, toUnix(key.CreatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) APIKeyByHash(ctx context.Context, hash []byte) (APIKey, error) {
+	var key APIKey
+	var created int64
+	var lastUsed sql.NullInt64
+	var disabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled
+		 FROM api_keys WHERE key_hash = ?`,
+		hash,
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return APIKey{}, ErrNotFound
+	}
+	if err != nil {
+		return APIKey{}, fmt.Errorf("get api key: %w", err)
+	}
+	key.CreatedAt = scanTime(created)
+	key.LastUsedAt = nullableUnix(lastUsed)
+	key.Disabled = disabled == 1
+	return key, nil
+}
+
+func (s *Store) APIKeyByID(ctx context.Context, id string) (APIKey, error) {
+	var key APIKey
+	var created int64
+	var lastUsed sql.NullInt64
+	var disabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled
+		 FROM api_keys WHERE id = ?`,
+		id,
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return APIKey{}, ErrNotFound
+	}
+	if err != nil {
+		return APIKey{}, fmt.Errorf("get api key by id: %w", err)
+	}
+	key.CreatedAt = scanTime(created)
+	key.LastUsedAt = nullableUnix(lastUsed)
+	key.Disabled = disabled == 1
+	return key, nil
+}
+
+func (s *Store) TouchAPIKey(ctx context.Context, id string, now time.Time) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE api_keys SET last_used_at = ? WHERE id = ?", toUnix(now), id,
+	); err != nil {
+		return fmt.Errorf("touch api key: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) APIKeyUsage(ctx context.Context, id string) (APIKeyUsage, error) {
+	var usage APIKeyUsage
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE api_key_id = ?`,
+		id,
+	).Scan(&usage.Files, &usage.Bytes)
+	if err != nil {
+		return APIKeyUsage{}, fmt.Errorf("api key usage: %w", err)
+	}
+	return usage, nil
+}
+
+func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT k.id, k.key_hash, k.key_prefix, k.name, k.created_at, k.last_used_at, k.disabled,
+		        COUNT(f.id), COALESCE(SUM(f.size), 0)
+		 FROM api_keys k
+		 LEFT JOIN files f ON f.api_key_id = k.id
+		 GROUP BY k.id
+		 ORDER BY k.created_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []APIKey
+	for rows.Next() {
+		var key APIKey
+		var created int64
+		var lastUsed sql.NullInt64
+		var disabled int
+		if err := rows.Scan(
+			&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled,
+			&key.FileCount, &key.FileBytes,
+		); err != nil {
+			return nil, fmt.Errorf("scan api key: %w", err)
+		}
+		key.CreatedAt = scanTime(created)
+		key.LastUsedAt = nullableUnix(lastUsed)
+		key.Disabled = disabled == 1
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api keys: %w", err)
+	}
+	return keys, nil
+}
+
+func (s *Store) SetAPIKeyDisabled(ctx context.Context, id string, disabled bool) error {
+	value := 0
+	if disabled {
+		value = 1
+	}
+	result, err := s.db.ExecContext(ctx, "UPDATE api_keys SET disabled = ? WHERE id = ?", value, id)
+	if err != nil {
+		return fmt.Errorf("update api key: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update api key rows: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
