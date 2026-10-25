@@ -63,6 +63,7 @@ type storageDTO struct {
 	LimitBytes     int64   `json:"limit_bytes"`
 	AvailableBytes int64   `json:"available_bytes"`
 	UsedPercent    float64 `json:"used_percent"`
+	Unlimited      bool    `json:"unlimited"`
 }
 
 type statusDTO struct {
@@ -283,6 +284,7 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 			LimitBytes:     status.Limit,
 			AvailableBytes: status.Available,
 			UsedPercent:    status.UsedPercent,
+			Unlimited:      status.Unlimited,
 		},
 		RetentionSeconds: int64(s.cfg.Retention.Seconds()),
 		RetentionHuman:   retentionLabel(s.cfg.Retention),

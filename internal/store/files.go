@@ -40,8 +40,25 @@ func scanFile(scanner rowScanner) (File, error) {
 }
 
 // ReserveStorage atomically reserves capacity. A single INSERT ... SELECT keeps
-// concurrent uploads from overshooting the configured maximum.
+// concurrent uploads from overshooting the configured maximum. A non-positive
+// limit disables the global cap and reserves unconditionally.
 func (s *Store) ReserveStorage(ctx context.Context, id string, bytes, limit int64, now, expiresAt time.Time) (bool, error) {
+	if limit <= 0 {
+		result, err := s.db.ExecContext(ctx,
+			`INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
+			 VALUES (?, ?, ?, ?)`,
+			id, bytes, toUnix(now), toUnix(expiresAt),
+		)
+		if err != nil {
+			return false, fmt.Errorf("reserve storage: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("reserve storage rows: %w", err)
+		}
+		return affected == 1, nil
+	}
+
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
 		 SELECT ?, ?, ?, ?

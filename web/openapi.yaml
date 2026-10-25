@@ -532,7 +532,7 @@ components:
           type: boolean
         storage:
           type: object
-          required: [files, used_bytes, reserved_bytes, limit_bytes, available_bytes, used_percent]
+          required: [files, used_bytes, reserved_bytes, limit_bytes, available_bytes, used_percent, unlimited]
           properties:
             files:
               type: integer
@@ -545,12 +545,17 @@ components:
             limit_bytes:
               type: integer
               format: int64
+              description: Configured global cap in bytes, or 0 when unlimited.
             available_bytes:
               type: integer
               format: int64
+              description: Remaining capacity in bytes, or 0 when unlimited.
             used_percent:
               type: number
               format: double
+            unlimited:
+              type: boolean
+              description: True when the global storage cap is disabled with MAX_STORAGE=0.
         retention_seconds:
           type: integer
           format: int64

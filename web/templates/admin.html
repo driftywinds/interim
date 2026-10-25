@@ -13,12 +13,14 @@
     <legend>Storage</legend>
     <div class="stat-grid">
         <div><h3>Files</h3><div class="stat">{{.Usage.Files}}</div><span class="muted">stored objects</span></div>
-        <div><h3>Used</h3><div class="stat">{{bytes .Usage.Used}}</div><span class="muted">{{pct .Percent}}% of cap</span></div>
+        <div><h3>Used</h3><div class="stat">{{bytes .Usage.Used}}</div><span class="muted">{{if .Unlimited}}no cap{{else}}{{pct .Percent}}% of cap{{end}}</span></div>
         <div><h3>Reserved</h3><div class="stat">{{bytes .Usage.Reserved}}</div><span class="muted">active uploads</span></div>
-        <div><h3>Limit</h3><div class="stat">{{bytes .MaxStorage}}</div><span class="muted">MAX_STORAGE</span></div>
+        <div><h3>Limit</h3><div class="stat">{{if .Unlimited}}Unlimited{{else}}{{bytes .MaxStorage}}{{end}}</div><span class="muted">{{if .Unlimited}}MAX_STORAGE=0{{else}}MAX_STORAGE{{end}}</span></div>
     </div>
+    {{if not .Unlimited}}
     <progress class="storage-progress" max="100" value="{{pct .Percent}}">{{pct .Percent}}%</progress>
     {{if ge .Percent 100.0}}<p class="warn-text">Storage is at capacity. New uploads are paused.</p>{{end}}
+    {{end}}
 </fieldset>
 
 <fieldset class="admin-section" id="files">

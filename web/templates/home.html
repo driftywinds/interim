@@ -4,15 +4,17 @@
 <div class="expiry-notice" role="note">
     <strong>Every file is permanently deleted after {{.RetentionLabel}}.</strong>
     <p class="storage-donate">
-        Want to support development and increase this limit?
+        {{if .Status.Unlimited}}Want to support development?{{else}}Want to support development and increase this limit?{{end}}
         <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
     </p>
 </div>
 
+{{if not .Status.Unlimited}}
 <div id="storage-full" class="warn" role="alert"{{if .Status.Accepting}} hidden{{end}}>
     <p class="lede">Storage maxed out — please try again later.</p>
     <p>Uploads are paused until existing files expire or are deleted.</p>
 </div>
+{{end}}
 
 <div id="upload-app"
      data-status-url="/api/v1/status"
@@ -33,6 +35,7 @@
     <ul id="upload-queue" class="upload-queue" hidden></ul>
 </div>
 
+{{if not .Status.Unlimited}}
 <fieldset class="storage-panel">
     <legend>Storage</legend>
     <p class="storage-numbers">
@@ -49,6 +52,7 @@
         · damn that's not that much
     </p>
 </fieldset>
+{{end}}
 
 <section class="history" aria-labelledby="history-title">
     <h2 id="history-title">Your uploads in this browser</h2>
@@ -78,7 +82,7 @@
     <ul>
         <li>No account needed</li>
         <li>Expiry period of {{.RetentionLabel}}</li>
-        <li>A strict storage cap (Please donate if you want more storage and retention time)</li>
+        <li>{{if .Status.Unlimited}}No global storage cap{{else}}A strict storage cap (Please donate if you want more storage and retention time){{end}}</li>
         <li>Basic upload history and deletion</li>
     </ul>
 </section>

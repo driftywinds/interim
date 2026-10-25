@@ -32,6 +32,7 @@ type StatusView struct {
 	Available   int64
 	UsedPercent float64
 	Accepting   bool
+	Unlimited   bool
 	MaxFileSize int64
 }
 
@@ -57,30 +58,32 @@ type FilePageView struct {
 
 type APIDocsView struct {
 	PageData
-	APIBase      string
-	OpenAPIJSON  string
-	OpenAPIYAML  string
-	MaxFileSize  string
-	MaxStorage   string
-	DownloadTTL  string
-	UploadURLTTL string
+	APIBase          string
+	OpenAPIJSON      string
+	OpenAPIYAML      string
+	MaxFileSize      string
+	MaxStorage       string
+	StorageUnlimited bool
+	DownloadTTL      string
+	UploadURLTTL     string
 }
 
 type AdminView struct {
 	PageData
-	Usage   store.Usage
-	Percent float64
-	Files   []store.AdminFile
-	Keys    []store.APIKey
-	Total   int64
-	Page    int
-	Pages   int
-	Query   string
-	PrevURL string
-	NextURL string
-	Deleted int
-	Failed  int
-	Now     time.Time
+	Usage     store.Usage
+	Percent   float64
+	Unlimited bool
+	Files     []store.AdminFile
+	Keys      []store.APIKey
+	Total     int64
+	Page      int
+	Pages     int
+	Query     string
+	PrevURL   string
+	NextURL   string
+	Deleted   int
+	Failed    int
+	Now       time.Time
 }
 
 type AuthView struct {

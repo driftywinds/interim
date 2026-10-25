@@ -88,18 +88,19 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	page.NoIndex = true
 
 	view := AdminView{
-		PageData: page,
-		Usage:    usage,
-		Percent:  percent,
-		Files:    files,
-		Keys:     keys,
-		Total:    total,
-		Page:     pageNumber,
-		Pages:    pages,
-		Query:    query,
-		PrevURL:  prevURL,
-		NextURL:  nextURL,
-		Now:      s.now(),
+		PageData:  page,
+		Usage:     usage,
+		Percent:   percent,
+		Unlimited: s.cfg.MaxStorage == 0,
+		Files:     files,
+		Keys:      keys,
+		Total:     total,
+		Page:      pageNumber,
+		Pages:     pages,
+		Query:     query,
+		PrevURL:   prevURL,
+		NextURL:   nextURL,
+		Now:       s.now(),
 	}
 	if raw := r.URL.Query().Get("deleted"); raw != "" {
 		view.Deleted, _ = strconv.Atoi(raw)

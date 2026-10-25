@@ -528,6 +528,30 @@ func TestOwnershipAndStorageQuota(t *testing.T) {
 	}
 }
 
+func TestUnlimitedStorage(t *testing.T) {
+	env := newTestEnv(t, 0, 5<<20)
+	result := env.upload(t, "", "unlimited.bin", []byte("no cap"))
+	if result.Status != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", result.Status, result.Body)
+	}
+
+	status, home := getBody(t, env.client, env.http.URL+"/")
+	if status != http.StatusOK {
+		t.Fatalf("home status = %d", status)
+	}
+	if bytes.Contains([]byte(home), []byte("<legend>Storage</legend>")) {
+		t.Error("home should hide the storage panel when the cap is disabled")
+	}
+	if bytes.Contains([]byte(home), []byte("Storage maxed out")) {
+		t.Error("home should hide the capacity warning when the cap is disabled")
+	}
+
+	status, body := getBody(t, env.client, env.http.URL+"/api/v1/status")
+	if status != http.StatusOK || !bytes.Contains([]byte(body), []byte(`"unlimited":true`)) {
+		t.Fatalf("status did not report unlimited storage: %d %s", status, body)
+	}
+}
+
 func TestExpiryAndCleanup(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
 	result := env.upload(t, "", "gone.txt", []byte("temporary"))

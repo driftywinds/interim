@@ -80,6 +80,7 @@ func main() {
 			"url", cfg.PublicBaseURL,
 			"listen", cfg.ListenAddr,
 			"storage_limit", cfg.MaxStorage,
+			"storage_unlimited", cfg.MaxStorage == 0,
 			"max_file_size", cfg.MaxFileSize,
 			"upload_url_ttl", cfg.UploadURLTTL.String(),
 			"upload_intent_ttl", cfg.UploadIntentTTL.String(),

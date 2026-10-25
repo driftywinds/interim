@@ -95,14 +95,15 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 	page := s.basePage(r, "API", "api")
 	page.Description = "interim API documentation, endpoints, auth, uploads, downloads, and OpenAPI specification."
 	view := APIDocsView{
-		PageData:     page,
-		APIBase:      s.cfg.PublicBaseURL + "/api/v1",
-		OpenAPIJSON:  s.cfg.PublicBaseURL + "/api/openapi.json",
-		OpenAPIYAML:  s.cfg.PublicBaseURL + "/api/openapi.yaml",
-		MaxFileSize:  units.FormatBytes(s.cfg.MaxFileSize),
-		MaxStorage:   units.FormatBytes(s.cfg.MaxStorage),
-		DownloadTTL:  humanDuration(s.cfg.DownloadTTL),
-		UploadURLTTL: humanDuration(s.cfg.UploadURLTTL),
+		PageData:         page,
+		APIBase:          s.cfg.PublicBaseURL + "/api/v1",
+		OpenAPIJSON:      s.cfg.PublicBaseURL + "/api/openapi.json",
+		OpenAPIYAML:      s.cfg.PublicBaseURL + "/api/openapi.yaml",
+		MaxFileSize:      units.FormatBytes(s.cfg.MaxFileSize),
+		MaxStorage:       units.FormatBytes(s.cfg.MaxStorage),
+		StorageUnlimited: s.cfg.MaxStorage == 0,
+		DownloadTTL:      humanDuration(s.cfg.DownloadTTL),
+		UploadURLTTL:     humanDuration(s.cfg.UploadURLTTL),
 	}
 	s.render(w, r, http.StatusOK, "api", view)
 }

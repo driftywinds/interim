@@ -1,7 +1,7 @@
 {{define "page"}}
 <div class="api-docs">
     <p class="lede">Tools to interact with interim programmatically. Uploads go directly from your client to the signed S3 endpoint; interim only signs and records metadata.</p>
-    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full. This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.</p>
+    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.</p>
 
     <nav class="docs-toc" aria-label="API sections">
         <a href="#overview">Overview</a>
@@ -195,7 +195,7 @@ X-Delete-Token: token_from_intent</code></pre>
     <details open>
         <summary><strong>Storage status</strong> <code>GET /status</code></summary>
         <div class="endpoint">
-            <p>Public. Reports whether uploads are currently accepted, used/reserved bytes, the configured cap, retention, and per-file limit.</p>
+            <p>Public. Reports whether uploads are currently accepted, used/reserved bytes, the configured cap (or unlimited), retention, and per-file limit.</p>
             <pre><code>GET {{.APIBase}}/status</code></pre>
         </div>
     </details>

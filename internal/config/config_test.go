@@ -49,6 +49,22 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestMaxStorageZeroDisablesCap(t *testing.T) {
+	for _, value := range []string{"0", "0B", "unlimited"} {
+		t.Run(value, func(t *testing.T) {
+			withBaseEnv(t)
+			t.Setenv("MAX_STORAGE", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() with MAX_STORAGE=%q: %v", value, err)
+			}
+			if cfg.MaxStorage != 0 {
+				t.Fatalf("MaxStorage = %d, want 0", cfg.MaxStorage)
+			}
+		})
+	}
+}
+
 func TestDownloadWorkerConfig(t *testing.T) {
 	withBaseEnv(t)
 	t.Setenv("DOWNLOAD_WORKER_ENABLED", "true")

@@ -94,7 +94,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	maxStorage, err := units.ParseBytes(envOr("MAX_STORAGE", "20GB"))
+	maxStorage, err := parseStorageLimit(envOr("MAX_STORAGE", "20GB"))
 	if err != nil {
 		return Config{}, fmt.Errorf("MAX_STORAGE: %w", err)
 	}
@@ -102,7 +102,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("MAX_FILE_SIZE: %w", err)
 	}
-	if maxFileSize > maxStorage {
+	if maxStorage > 0 && maxFileSize > maxStorage {
 		return Config{}, errors.New("MAX_FILE_SIZE cannot be larger than MAX_STORAGE")
 	}
 	if maxFileSize > MaxSinglePutSize {
@@ -426,6 +426,16 @@ func parseDuration(name, fallback string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return duration, nil
+}
+
+// parseStorageLimit accepts a byte size, or zero/unlimited to disable the
+// global storage cap. MAX_FILE_SIZE remains enforced independently.
+func parseStorageLimit(value string) (int64, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "0b", "unlimited":
+		return 0, nil
+	}
+	return units.ParseBytes(value)
 }
 
 // parseRetention accepts standard Go durations plus day-based values such as

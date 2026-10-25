@@ -18,8 +18,9 @@ Docker as the primary deployment target.
 - Private S3 bucket. No permanent object URLs; download links are short-lived
   (signed S3 GETs or worker-proxied token URLs) and expire after
   `DOWNLOAD_URL_TTL`.
-- Configurable per-file and total storage caps, enforced with atomic
-  reservations so concurrent uploads cannot oversubscribe capacity.
+- Configurable per-file and total storage caps (the total cap can be disabled),
+  enforced with atomic reservations so concurrent uploads cannot oversubscribe
+  capacity.
 - A janitor that runs at startup and on intervals, deleting expired upload
   intents, temporary objects, orphan S3 keys, terminal intent rows, and stale
   reservations.
@@ -404,8 +405,8 @@ automatically for local runs, and Compose uses it via `env_file`.
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
 | `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT URL lifetime. 5m–2h. |
 | `UPLOAD_INTENT_TTL` | no | `45m` | Deadline for completion; must be at least `UPLOAD_URL_TTL`. Max 6h. |
-| `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. |
-| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` or the 5 GB single-PUT limit. |
+| `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
+| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set, or the 5 GB single-PUT limit. |
 | `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry. |
 | `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. Also the worker download token lifetime. |
 | `DOWNLOAD_WORKER_ENABLED` | no | `false` | Use Cloudflare Worker download URLs instead of presigned S3 GETs. |
@@ -587,7 +588,11 @@ believe they fit. The reservation is converted into a committed file only after
 the object is verified. The actual object size is checked with `HeadObject` at
 completion; a smaller object is accepted and a larger one is deleted.
 
-When committed storage plus reservations reaches `MAX_STORAGE`:
+Set `MAX_STORAGE=0` (or `MAX_STORAGE=unlimited`) to disable the global cap. The
+per-file limit still applies, the API reports `storage.unlimited: true`, and the
+home page hides the storage panel and capacity warning.
+
+When a cap is set and committed storage plus reservations reaches `MAX_STORAGE`:
 
 - `/api/v1/status` reports `accepting_uploads: false`;
 - new upload intents return HTTP `507 storage_full`;

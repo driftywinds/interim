@@ -182,8 +182,9 @@ func (s *Server) status(ctx context.Context) (StatusView, error) {
 	if err != nil {
 		return StatusView{}, err
 	}
+	unlimited := s.cfg.MaxStorage == 0
 	available := s.cfg.MaxStorage - usage.Used - usage.Reserved
-	if available < 0 {
+	if unlimited || available < 0 {
 		available = 0
 	}
 	percent := 0.0
@@ -200,7 +201,8 @@ func (s *Server) status(ctx context.Context) (StatusView, error) {
 		Limit:       s.cfg.MaxStorage,
 		Available:   available,
 		UsedPercent: percent,
-		Accepting:   available > 0,
+		Accepting:   unlimited || available > 0,
+		Unlimited:   unlimited,
 		MaxFileSize: s.cfg.MaxFileSize,
 	}, nil
 }
