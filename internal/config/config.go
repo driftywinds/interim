@@ -63,6 +63,7 @@ type Config struct {
 	MultipartThreshold         int64
 	MultipartPartSize          int64
 	MultipartConcurrency       int
+	MultipartSignPartLength    bool
 
 	PublicUploadsEnabled bool
 
@@ -74,17 +75,18 @@ type Config struct {
 }
 
 type S3Config struct {
-	Endpoint       string
-	PublicEndpoint string
-	Region         string
-	Bucket         string
-	AccessKey      string
-	SecretKey      string
-	PutAccessKey   string
-	PutSecretKey   string
-	Prefix         string
-	PathStyle      bool
-	AutoCreate     bool
+	Endpoint                 string
+	PublicEndpoint           string
+	Region                   string
+	Bucket                   string
+	AccessKey                string
+	SecretKey                string
+	PutAccessKey             string
+	PutSecretKey             string
+	Prefix                   string
+	PathStyle                bool
+	AutoCreate               bool
+	PublicEndpointBlocksCopy bool
 }
 
 func Load() (Config, error) {
@@ -160,6 +162,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MULTIPART_PART_SIZE: %w", err)
 	}
 	multipartConcurrency, err := parseIntLimit("MULTIPART_CONCURRENCY", 3, 1, 8)
+	if err != nil {
+		return Config{}, err
+	}
+	multipartSignPartLength, err := parseBool("MULTIPART_SIGN_PART_LENGTH", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -259,6 +265,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if multipartEnabled && s3.PutAccessKey == "" && !s3.PublicEndpointBlocksCopy {
+		return Config{}, errors.New("multipart uploads require S3_PUT_ACCESS_KEY/S3_PUT_SECRET_KEY, or S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true when the public endpoint blocks X-Amz-Copy-Source")
+	}
 
 	logLevel := strings.ToLower(envOr("LOG_LEVEL", "info"))
 	switch logLevel {
@@ -293,6 +302,7 @@ func Load() (Config, error) {
 		MultipartThreshold:         multipartThreshold,
 		MultipartPartSize:          multipartPartSize,
 		MultipartConcurrency:       multipartConcurrency,
+		MultipartSignPartLength:    multipartSignPartLength,
 		PublicUploadsEnabled:       publicUploadsEnabled,
 		DownloadWorkerEnabled:      downloadWorkerEnabled,
 		DownloadWorkerURLs:         downloadWorkerURLs,
@@ -390,6 +400,10 @@ func loadS3() (S3Config, error) {
 	if err != nil {
 		return S3Config{}, err
 	}
+	blocksCopy, err := parseBool("S3_PUBLIC_ENDPOINT_BLOCKS_COPY", false)
+	if err != nil {
+		return S3Config{}, err
+	}
 
 	prefix := strings.Trim(strings.TrimSpace(os.Getenv("S3_OBJECT_PREFIX")), "/")
 	if prefix == "" {
@@ -398,17 +412,18 @@ func loadS3() (S3Config, error) {
 	prefix += "/"
 
 	return S3Config{
-		Endpoint:       endpoint,
-		PublicEndpoint: publicEndpoint,
-		Region:         envOr("S3_REGION", "us-east-1"),
-		Bucket:         bucket,
-		AccessKey:      accessKey,
-		SecretKey:      secretKey,
-		PutAccessKey:   putAccessKey,
-		PutSecretKey:   putSecretKey,
-		Prefix:         prefix,
-		PathStyle:      pathStyle,
-		AutoCreate:     autoCreate,
+		Endpoint:                 endpoint,
+		PublicEndpoint:           publicEndpoint,
+		Region:                   envOr("S3_REGION", "us-east-1"),
+		Bucket:                   bucket,
+		AccessKey:                accessKey,
+		SecretKey:                secretKey,
+		PutAccessKey:             putAccessKey,
+		PutSecretKey:             putSecretKey,
+		Prefix:                   prefix,
+		PathStyle:                pathStyle,
+		AutoCreate:               autoCreate,
+		PublicEndpointBlocksCopy: blocksCopy,
 	}, nil
 }
 

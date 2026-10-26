@@ -336,6 +336,26 @@ func (s *Store) KnownObjectKeys(ctx context.Context, now time.Time) (map[string]
 	return known, nil
 }
 
+func (s *Store) KnownMultipartUploadIDs(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT multipart_upload_id FROM upload_intents WHERE multipart_upload_id != ''")
+	if err != nil {
+		return nil, fmt.Errorf("list multipart upload ids: %w", err)
+	}
+	defer rows.Close()
+	known := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan multipart upload id: %w", err)
+		}
+		known[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate multipart upload ids: %w", err)
+	}
+	return known, nil
+}
+
 func (s *Store) CleanOrphanReservations(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
 		`DELETE FROM storage_reservations

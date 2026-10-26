@@ -22,7 +22,8 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `S3_REGION` | no | `us-east-1` | Any non-empty value for servers that ignore regions. |
 | `S3_BUCKET` | yes | — | Must be a bare bucket name. |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | AWS no | — | Leave both empty to use the instance-role/default credential chain. |
-| `S3_PUT_ACCESS_KEY` / `S3_PUT_SECRET_KEY` | no | — | Optional write-only identity used only for presigned browser PUTs. Set both or neither. |
+| `S3_PUT_ACCESS_KEY` / `S3_PUT_SECRET_KEY` | no | — | Optional write-only identity used only for presigned browser PUTs. Required for multipart unless the next flag is set. |
+| `S3_PUBLIC_ENDPOINT_BLOCKS_COPY` | no | `false` | Set true only when the public endpoint rejects copy headers. Allows multipart without write-only upload credentials. |
 | `S3_FORCE_PATH_STYLE` | no | `true` | Keep true for sss3/MinIO/Garage; false for AWS. |
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
@@ -33,6 +34,7 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `MULTIPART_THRESHOLD` | no | `64MB` | Size above which multipart is used. `0` makes every upload multipart. Max 5GB. |
 | `MULTIPART_PART_SIZE` | no | `16MB` | Requested part size. 5MB–5GB; raised automatically for the 10,000-part limit. |
 | `MULTIPART_CONCURRENCY` | no | `3` | Browser part parallelism, 1–8. |
+| `MULTIPART_SIGN_PART_LENGTH` | no | `true` | Sign the exact part Content-Length into presigned URLs. Disable only if the provider cannot verify signed Content-Length. |
 | `MAX_PENDING_UPLOADS_PER_CLIENT` | no | `2` | Per-key or per-IP pending intent cap. `0` disables. |
 | `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Per-key or per-IP reserved-byte cap. `0` disables. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |

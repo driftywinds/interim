@@ -56,14 +56,20 @@ single `url`. It includes `part_size`, `part_count`, `parts_url`, and
    `{"part_numbers":[1,2,3]}`. The response contains short-lived part URLs.
 2. PUT each part body to its URL. Read the response `ETag`.
 3. `PUT parts_url/{n}` with `{"etag":"...","size":123}` and
-   `X-Upload-Token`.
+   `X-Upload-Token`. `size` must be exact: non-final parts equal `part_size`,
+   and the final part equals the remaining bytes. When
+   `MULTIPART_SIGN_PART_LENGTH=true`, the part URL signs that Content-Length, so
+   send a fixed-length body, not chunked transfer encoding.
 4. Repeat until `GET status_url` reports all parts in `completed_parts`.
 5. Call `complete_url` with `X-Upload-Token`.
 
 All parts from 1 through `part_count` must be reported before completion; parts
-can be uploaded and reported concurrently. The server still does the final
-`HeadObject` size check and live-key copy. A failed part can be retried
-independently; `GET status_url` lets a client resume after reload.
+can be uploaded and reported concurrently. The server verifies provider-side
+part sizes/ETags, assembles the multipart object, and uses the staging key as the
+live object (no second copy). The final `HeadObject` size check still runs. A
+provider-side size or ETag mismatch returns `413 part_size_mismatch`. A failed
+part can be retried independently; `GET status_url` lets a client resume after
+reload.
 
 ## Endpoints
 

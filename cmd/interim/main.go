@@ -109,6 +109,7 @@ func main() {
 			"multipart_enabled", cfg.MultipartEnabled,
 			"multipart_threshold", cfg.MultipartThreshold,
 			"multipart_part_size", cfg.MultipartPartSize,
+			"multipart_sign_part_length", cfg.MultipartSignPartLength,
 			"upload_url_ttl", cfg.UploadURLTTL.String(),
 			"upload_intent_ttl", cfg.UploadIntentTTL.String(),
 			"retention", cfg.Retention.String(),
@@ -131,7 +132,7 @@ func main() {
 		failed = true
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil && !strings.Contains(err.Error(), "context deadline") {
 		logger.Warn("graceful shutdown incomplete", "error", err)

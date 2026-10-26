@@ -18,6 +18,24 @@
 	@copyrange header X-Amz-Copy-Source-Range *
 	respond @copyrange "CopyPart is not allowed on the public endpoint" 403
 
+	@amzacl header X-Amz-Acl *
+	respond @amzacl "ACL headers are not allowed on the public endpoint" 403
+
+	@amztagging header X-Amz-Tagging *
+	respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
+
+	@amzmetadata header X-Amz-Metadata-Directive *
+	respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
+
+	@amzlockmode header X-Amz-Object-Lock-Mode *
+	respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
+
+	@amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
+	respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
+
+	@amzlockhold header X-Amz-Object-Lock-Legal-Hold *
+	respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
+
 	@options method OPTIONS
 	handle @options {
 		header {

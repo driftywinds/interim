@@ -30,7 +30,13 @@ func (s *Server) cleanupExpiredUploadIntents(ctx context.Context) (int, error) {
 			break
 		}
 		for _, intent := range intents {
-			s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
+			if err := s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID); err != nil {
+				s.logger.Error("janitor could not abort expired multipart upload", "upload_id", intent.ID, "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
 			deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err := s.objects.Delete(deleteCtx, intent.ObjectKey)
 			cancel()
@@ -114,6 +120,38 @@ func (s *Server) deepSweep(ctx context.Context, startup bool) (int, error) {
 		}
 		s.logger.Warn("janitor deleted orphan object", "key", object.Key, "size", object.Size)
 		deleted++
+	}
+
+	uploads, listErr := s.objects.ListMultipartUploads(listCtx, s.cfg.S3.Prefix)
+	if listErr != nil {
+		s.logger.Warn("janitor could not list multipart uploads", "error", listErr)
+		return deleted, firstErr
+	}
+	knownUploads, err := s.store.KnownMultipartUploadIDs(ctx)
+	if err != nil {
+		if firstErr == nil {
+			firstErr = err
+		}
+		return deleted, firstErr
+	}
+	for _, upload := range uploads {
+		if _, ok := knownUploads[upload.UploadID]; ok {
+			continue
+		}
+		if !startup && (upload.Initiated.IsZero() || now.Sub(upload.Initiated) < orphanObjectGrace) {
+			continue
+		}
+		abortCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := s.objects.AbortMultipart(abortCtx, upload.Key, upload.UploadID)
+		cancel()
+		if err != nil {
+			s.logger.Error("janitor could not abort orphan multipart upload", "key", upload.Key, "upload_id", upload.UploadID, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		s.logger.Warn("janitor aborted orphan multipart upload", "key", upload.Key, "upload_id", upload.UploadID)
 	}
 	return deleted, firstErr
 }

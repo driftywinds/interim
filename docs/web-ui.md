@@ -12,8 +12,10 @@ server for completed parts and continues; it does not recreate the upload.
 Interrupted multipart sessions are stored in `localStorage` under
 `interim.multipart.v1` along with the upload token. Select the same file again
 to resume from the recorded parts; the interrupted-upload list also offers
-Discard, which aborts the server-side multipart upload. The upload token is a
-bearer credential, so treat browser storage like the delete token.
+Discard, which aborts the server-side multipart upload. Session API URLs are
+accepted only when they are same-origin with the UI; malformed or cross-origin
+session records are discarded. The upload token is a bearer credential, so treat
+browser storage like the delete token.
 
 Completed uploads are stored in `localStorage` under `interim.uploads.v1`,
 including the per-file delete token. Only that browser can see the list.

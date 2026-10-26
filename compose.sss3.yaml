@@ -21,6 +21,11 @@ services:
       STUPID_RW_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env.sss3}
       STUPID_BUCKET_NAME: ${S3_BUCKET:-interim}
       STUPID_LOG_LEVEL: ${SSS3_LOG_LEVEL:-info}
+      # Keep this at or below the part size interim will request. If
+      # MAX_FILE_SIZE requires a larger effective part size, raise both.
+      STUPID_MAX_PART_SIZE: ${STUPID_MAX_PART_SIZE:-16777216}
+      # Raise only if interim MAX_FILE_SIZE exceeds 5GB.
+      STUPID_MAX_OBJECT_SIZE: ${STUPID_MAX_OBJECT_SIZE:-5368709120}
     volumes:
       - ./data:/var/lib/stupid-simple-s3
     networks:

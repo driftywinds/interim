@@ -28,6 +28,13 @@
   and admin credentials.
 - The HTTP server uses 10s header, 30s read, 30s write, and 60s idle timeouts.
   File bytes go directly to S3, so these do not constrain large uploads.
+- Completion detaches from the request context and clears the per-response write
+  deadline, with a 30-minute background deadline. A proxy can still time out
+  before the response arrives; completion is idempotent, so retrying it is safe.
+  Graceful shutdown waits up to two minutes; Compose uses a 150s stop grace.
+- A single PUT temporarily needs space for both the staging object and the live
+  copy. Multipart uses the staging key as the live object and avoids that second
+  copy.
 - For production, pin container images by digest (especially the sss3 image,
   which holds the data and RW credential) and pin GitHub Actions to commit SHAs
   rather than mutable major tags.

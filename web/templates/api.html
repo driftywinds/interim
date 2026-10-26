@@ -78,7 +78,7 @@ PUT PART_URL
 PUT /uploads/UPLOAD_ID/parts/1
 X-Upload-Token: UPLOAD_TOKEN
 {"etag":"\"...\"","size":16777216}</code></pre>
-    <p>All parts 1–<code>part_count</code> must be recorded before completion. <code>GET /uploads/UPLOAD_ID</code> returns <code>completed_parts</code> so a client can resume. The server assembles the parts, verifies the final size, then copies the staging object to the live key.</p>
+    <p>All parts 1–<code>part_count</code> must be recorded before completion. <code>GET /uploads/UPLOAD_ID</code> returns <code>completed_parts</code> so a client can resume. The server verifies provider-side part sizes/ETags, assembles the parts, verifies the final size, and uses the staging key as the live object.</p>
     {{end}}
 
     <h2 id="quickstart">Quickstart</h2>
@@ -195,7 +195,7 @@ Content-Type: application/json
     <details open>
         <summary><strong>Report a part</strong> <code>PUT /uploads/{id}/parts/{n}</code></summary>
         <div class="endpoint">
-            <p>Requires <code>X-Upload-Token</code>. Record the ETag and byte size returned by the part PUT.</p>
+            <p>Requires <code>X-Upload-Token</code>. Record the ETag and exact byte size returned by the part PUT. Non-final parts must equal <code>part_size</code>; the final part must equal the remaining bytes.</p>
             <pre><code>PUT {{.APIBase}}/uploads/UPLOAD_ID/parts/1
 X-Upload-Token: UPLOAD_TOKEN
 Content-Type: application/json
@@ -208,7 +208,7 @@ Content-Type: application/json
     <details open>
         <summary><strong>Complete an upload</strong> <code>POST /uploads/{id}/complete</code></summary>
         <div class="endpoint">
-            <p>Requires <code>X-Upload-Token</code>. {{if .MultipartEnabled}}In multipart mode, assembles the reported parts first. {{end}}Then verifies the object with a HEAD request, checks its actual size, copies it to the live key, consumes the quota reservation, and commits the file. This endpoint is idempotent: a retry of an already committed upload returns the existing file.</p>
+            <p>Requires <code>X-Upload-Token</code>. {{if .MultipartEnabled}}In multipart mode, assembles the reported parts first and uses the staging key as the live object. {{end}}It verifies the object with a HEAD request, checks its actual size, consumes the quota reservation, and commits the file. Single PUTs are copied to a separate live key. This endpoint is idempotent: a retry of an already committed upload returns the existing file.</p>
             <pre><code>POST {{.APIBase}}/uploads/UPLOAD_ID/complete
 X-Upload-Token: UPLOAD_TOKEN_FROM_INTENT</code></pre>
             <pre><code>HTTP/1.1 201 Created
@@ -286,7 +286,7 @@ X-Delete-Token: token_from_intent</code></pre>
         <tr><td>404</td><td><code>not_found</code></td><td>Unknown file, upload, or endpoint.</td></tr>
         <tr><td>409</td><td><code>upload_missing</code> / <code>upload_parts_incomplete</code></td><td>The PUT has not reached storage yet, or not all multipart parts are recorded.</td></tr>
         <tr><td>410</td><td><code>expired</code> / <code>upload_expired</code></td><td>The file retention period or upload window has ended.</td></tr>
-        <tr><td>413</td><td><code>file_too_large</code></td><td>Declared or actual object exceeds the file cap.</td></tr>
+        <tr><td>413</td><td><code>file_too_large</code> / <code>part_size_mismatch</code></td><td>Declared or actual object exceeds the file cap, or a provider part does not match its declared size.</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>Too many requests; check <code>Retry-After</code>.</td></tr>
         <tr><td>507</td><td><code>storage_full</code></td><td>No storage capacity available.</td></tr>
         </tbody>

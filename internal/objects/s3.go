@@ -34,6 +34,18 @@ type MultipartPart struct {
 	ETag       string
 }
 
+type MultipartPartInfo struct {
+	PartNumber int32
+	ETag       string
+	Size       int64
+}
+
+type MultipartUploadInfo struct {
+	Key       string
+	UploadID  string
+	Initiated time.Time
+}
+
 type ObjectInfo struct {
 	Key          string
 	Size         int64
@@ -46,9 +58,11 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 	Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error
 	CreateMultipart(ctx context.Context, key, contentType, contentDisposition string) (string, error)
-	PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, ttl time.Duration) (string, time.Time, error)
+	PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, contentLength int64, ttl time.Duration) (string, time.Time, error)
+	ListParts(ctx context.Context, key, uploadID string) ([]MultipartPartInfo, error)
 	CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) error
 	AbortMultipart(ctx context.Context, key, uploadID string) error
+	ListMultipartUploads(ctx context.Context, prefix string) ([]MultipartUploadInfo, error)
 	PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error)
 	PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error)
 	Head(ctx context.Context, key string) (ObjectInfo, error)
@@ -220,7 +234,7 @@ func (s *S3Store) CreateMultipart(ctx context.Context, key, contentType, content
 	return *output.UploadId, nil
 }
 
-func (s *S3Store) PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, ttl time.Duration) (string, time.Time, error) {
+func (s *S3Store) PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, contentLength int64, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(ttl)
 	input := &s3.UploadPartInput{
 		Bucket:     aws.String(s.bucket),
@@ -228,11 +242,70 @@ func (s *S3Store) PresignUploadPart(ctx context.Context, key, uploadID string, p
 		UploadId:   aws.String(uploadID),
 		PartNumber: aws.Int32(int32(partNumber)),
 	}
+	if contentLength > 0 {
+		input.ContentLength = aws.Int64(contentLength)
+	}
 	presigned, err := s.putPresigner.PresignUploadPart(ctx, input, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("presign upload part: %w", err)
 	}
 	return presigned.URL, expiresAt, nil
+}
+
+func (s *S3Store) ListParts(ctx context.Context, key, uploadID string) ([]MultipartPartInfo, error) {
+	paginator := s3.NewListPartsPaginator(s.client, &s3.ListPartsInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	var parts []MultipartPartInfo
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			if isNoSuchUpload(err) {
+				return nil, ErrNoSuchUpload
+			}
+			return nil, fmt.Errorf("list multipart parts: %w", err)
+		}
+		for _, part := range page.Parts {
+			size := int64(0)
+			if part.Size != nil {
+				size = *part.Size
+			}
+			parts = append(parts, MultipartPartInfo{
+				PartNumber: aws.ToInt32(part.PartNumber),
+				ETag:       aws.ToString(part.ETag),
+				Size:       size,
+			})
+		}
+	}
+	return parts, nil
+}
+
+func (s *S3Store) ListMultipartUploads(ctx context.Context, prefix string) ([]MultipartUploadInfo, error) {
+	paginator := s3.NewListMultipartUploadsPaginator(s.client, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	var uploads []MultipartUploadInfo
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list multipart uploads: %w", err)
+		}
+		for _, upload := range page.Uploads {
+			initiated := time.Time{}
+			if upload.Initiated != nil {
+				initiated = *upload.Initiated
+			}
+			uploads = append(uploads, MultipartUploadInfo{
+				Key:       aws.ToString(upload.Key),
+				UploadID:  aws.ToString(upload.UploadId),
+				Initiated: initiated,
+			})
+		}
+	}
+	return uploads, nil
 }
 
 func (s *S3Store) CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) error {

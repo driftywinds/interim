@@ -124,6 +124,24 @@ sss3.example.com {
     @copyrange header X-Amz-Copy-Source-Range *
     respond @copyrange "CopyPart is not allowed on the public endpoint" 403
 
+    @amzacl header X-Amz-Acl *
+    respond @amzacl "ACL headers are not allowed on the public endpoint" 403
+
+    @amztagging header X-Amz-Tagging *
+    respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
+
+    @amzmetadata header X-Amz-Metadata-Directive *
+    respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
+
+    @amzlockmode header X-Amz-Object-Lock-Mode *
+    respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
+
+    @amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
+    respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
+
+    @amzlockhold header X-Amz-Object-Lock-Legal-Hold *
+    respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
+
     reverse_proxy 100.x.y.z:5554 {
         header_up Host {http.request.hostport}
     }
@@ -165,6 +183,7 @@ S3_REGION=us-east-1
 S3_BUCKET=interim
 S3_FORCE_PATH_STYLE=true
 S3_AUTO_CREATE_BUCKET=false
+S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true
 
 MAX_FILE_SIZE=5GB
 UPLOAD_URL_TTL=2h
@@ -176,10 +195,11 @@ Important details:
 - `S3_PUBLIC_ENDPOINT` is embedded in browser presigned PUT/GET URLs. It must
   be the public VPS hostname.
 - `S3_ENDPOINT` is used by interim for `HeadObject`, `CopyObject`,
-  `ListObjectsV2`, and deletes. It must use the tailnet address or another
-  direct/private route, never the public VPS Caddy. The public proxy blocks
-  `CopyObject`, which completion needs for the staging-to-live copy. If interim
-  cannot reach the tailnet, place it on the tailnet or provide a private route.
+  `ListParts`, `ListObjectsV2`, and deletes. It must use the tailnet address or
+  another direct/private route, never the public VPS Caddy. The public proxy
+  blocks `CopyObject`, which single-PUT completion needs for the staging-to-live
+  copy; multipart uses the staging key as the live object. If interim cannot
+  reach the tailnet, place it on the tailnet or provide a private route.
 - If interim shares a Docker network with sss3, `S3_ENDPOINT` can instead be
   `http://stupid-simple-s3:5553`. If it points at the Caddy container, use the
   Caddy port and keep `{http.request.hostport}`.
@@ -190,9 +210,9 @@ Important details:
   `STUPID_RW_ACCESS_KEY` and `STUPID_RW_SECRET_KEY`.
 - `S3_AUTO_CREATE_BUCKET=false` is preferred once sss3's configured bucket
   exists. sss3 creates `STUPID_BUCKET_NAME` at startup.
-- `MAX_FILE_SIZE` may be up to `5GB`; interim still uses a single S3 PUT. The
-  former Cloudflare 100 MB cap is gone because the browser talks to the VPS,
-  not Cloudflare.
+- `MAX_FILE_SIZE` may exceed 5 GB only with multipart enabled. Multipart parts
+  are separate requests and are not constrained by Cloudflare's 100 MB body cap
+  here because the browser talks to the VPS directly.
 - Increase `UPLOAD_URL_TTL` and `UPLOAD_INTENT_TTL` for slow home uplinks.
   `UPLOAD_INTENT_TTL` must be at least `UPLOAD_URL_TTL`.
 
@@ -261,4 +281,8 @@ Useful checks:
 - `sss3` is still HTTP-only and path-style. Keep `S3_FORCE_PATH_STYLE=true` and
   region `us-east-1`.
 - sss3's default `STUPID_MAX_OBJECT_SIZE` is `5GB`. Keep interim's
-  `MAX_FILE_SIZE` at or below that, or raise both limits.
+  `MAX_FILE_SIZE` at or below that, or raise it and `STUPID_MAX_OBJECT_SIZE`.
+  Raise `STUPID_MAX_PART_SIZE` together with `MULTIPART_PART_SIZE` if the
+  effective part size grows for very large files. If sss3 rejects normal part
+  PUTs with `SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` and
+  rely on the provider-side part-size cap.

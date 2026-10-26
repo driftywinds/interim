@@ -72,8 +72,8 @@ func TestLoad(t *testing.T) {
 	if cfg.MultipartEnabled {
 		t.Error("multipart uploads should default to disabled")
 	}
-	if cfg.MultipartThreshold != 64<<20 || cfg.MultipartPartSize != 16<<20 || cfg.MultipartConcurrency != 3 {
-		t.Errorf("multipart defaults = %d / %d / %d", cfg.MultipartThreshold, cfg.MultipartPartSize, cfg.MultipartConcurrency)
+	if cfg.MultipartThreshold != 64<<20 || cfg.MultipartPartSize != 16<<20 || cfg.MultipartConcurrency != 3 || !cfg.MultipartSignPartLength {
+		t.Errorf("multipart defaults = %d / %d / %d / %v", cfg.MultipartThreshold, cfg.MultipartPartSize, cfg.MultipartConcurrency, cfg.MultipartSignPartLength)
 	}
 }
 
@@ -84,11 +84,13 @@ func TestMultipartConfig(t *testing.T) {
 	t.Setenv("MULTIPART_THRESHOLD", "128MB")
 	t.Setenv("MULTIPART_PART_SIZE", "8MB")
 	t.Setenv("MULTIPART_CONCURRENCY", "4")
+	t.Setenv("S3_PUT_ACCESS_KEY", "put-access")
+	t.Setenv("S3_PUT_SECRET_KEY", "put-secret")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.MultipartEnabled || cfg.MaxFileSize != 6<<30 || cfg.MultipartThreshold != 128<<20 || cfg.MultipartPartSize != 8<<20 || cfg.MultipartConcurrency != 4 {
+	if !cfg.MultipartEnabled || cfg.MaxFileSize != 6<<30 || cfg.MultipartThreshold != 128<<20 || cfg.MultipartPartSize != 8<<20 || cfg.MultipartConcurrency != 4 || !cfg.MultipartSignPartLength {
 		t.Fatalf("multipart config = %+v", cfg)
 	}
 }
@@ -102,6 +104,8 @@ func TestMultipartConfigRejectsUnsafeValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			withBaseEnv(t)
 			t.Setenv("MULTIPART_UPLOAD_ENABLED", "true")
+			t.Setenv("S3_PUT_ACCESS_KEY", "put-access")
+			t.Setenv("S3_PUT_SECRET_KEY", "put-secret")
 			t.Setenv(name, value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("expected %s=%s to fail", name, value)
@@ -152,6 +156,18 @@ func TestTrustedProxyConfig(t *testing.T) {
 	t.Setenv("TRUSTED_PROXY_CIDRS", "not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid trusted proxy CIDR to fail")
+	}
+}
+
+func TestMultipartRequiresUploadIdentity(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("MULTIPART_UPLOAD_ENABLED", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected multipart without upload identity or copy-block acknowledgment to fail")
+	}
+	t.Setenv("S3_PUBLIC_ENDPOINT_BLOCKS_COPY", "true")
+	if _, err := Load(); err != nil {
+		t.Fatalf("copy-block acknowledgment should allow multipart: %v", err)
 	}
 }
 

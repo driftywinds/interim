@@ -215,6 +215,19 @@
         }
     }
 
+    function sameOriginURL(value) {
+        try {
+            return new URL(value, window.location.href).origin === window.location.origin;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function validSessionURLs(item) {
+        return [item.statusURL, item.partsURL, item.completeURL, item.abortURL]
+            .every((value) => typeof value === "string" && value !== "" && sameOriginURL(value));
+    }
+
     function readMultipartSessions() {
         try {
             const raw = window.localStorage.getItem(MULTIPART_KEY);
@@ -222,7 +235,7 @@
             if (!Array.isArray(parsed)) return [];
             const now = Date.now();
             return parsed.filter((item) => {
-                if (!item || typeof item !== "object" || !item.id || !item.uploadToken) return false;
+                if (!item || typeof item !== "object" || !item.id || !item.uploadToken || !validSessionURLs(item)) return false;
                 const expires = Date.parse(item.expiresAt || "");
                 return Number.isNaN(expires) || expires > now;
             });
@@ -240,6 +253,15 @@
     }
 
     function saveMultipartSession(file, intent) {
+        if (!intent || !validSessionURLs({
+            statusURL: intent.status_url,
+            partsURL: intent.parts_url,
+            completeURL: intent.complete_url,
+            abortURL: intent.abort_url
+        })) {
+            toast("The server returned invalid upload endpoints.");
+            return null;
+        }
         const session = {
             id: intent.upload_id,
             uploadToken: intent.upload_token,
@@ -763,6 +785,10 @@
                 task.intent = intent;
                 if (intent.mode === "multipart") {
                     task.multipartSession = saveMultipartSession(task.file, intent);
+                    if (!task.multipartSession) {
+                        failUploadTask(task, new Error("The server returned invalid upload endpoints."), false);
+                        return;
+                    }
                     task.partProgress = new Map();
                     task.completedParts = new Set();
                     renderResumeSessions();

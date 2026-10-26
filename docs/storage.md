@@ -27,27 +27,37 @@ header.
 
 ## Upload staging and write-only credentials
 
-Presigned browser PUTs write to `<S3_OBJECT_PREFIX>uploads/<upload-id>`. After
-verifying the staging object's size, the server copies it with `CopyObject` to
-`<S3_OBJECT_PREFIX>objects/<random>` and commits only the live key. The client
-never receives a URL for the live key, and the public endpoint should reject
-`X-Amz-Copy-Source` and `X-Amz-Copy-Source-Range` so a presigned PUT cannot be
-switched into a server-side copy.
+Presigned browser PUTs write to `<S3_OBJECT_PREFIX>uploads/<upload-id>`. For a
+single PUT, the server verifies the staging object, copies it with `CopyObject`
+to `<S3_OBJECT_PREFIX>objects/<random>`, and commits the live key. The client
+never receives a URL for the live key. For multipart, `CompleteMultipartUpload`
+turns the staging key into the live object, so there is no second copy and no
+5 GB single-copy limit.
 
 With multipart enabled, browser part URLs use `S3_PUBLIC_ENDPOINT`, while
-`CreateMultipartUpload`, `CompleteMultipartUpload`, and `AbortMultipartUpload`
-use the server-side `S3_ENDPOINT`. On sss3 that endpoint must be internal/direct
-because the public Caddy listener blocks `CopyObject`.
+`CreateMultipartUpload`, `CompleteMultipartUpload`, `ListParts`, and
+`AbortMultipartUpload` use the server-side `S3_ENDPOINT`. On sss3 that endpoint
+must be internal/direct because the public Caddy listener blocks `CopyObject`.
+The public endpoint should reject `X-Amz-Copy-Source`,
+`X-Amz-Copy-Source-Range`, ACL/tagging/metadata overrides, and object-lock
+headers so a presigned PUT cannot switch operations.
 
 For providers that support write-only credentials, set
 `S3_PUT_ACCESS_KEY` and `S3_PUT_SECRET_KEY`. Those credentials are used only
 for presigning browser PUTs; `S3_ACCESS_KEY` / `S3_SECRET_KEY` retain read,
 copy, list, and delete access. On AWS, the upload identity needs only
 `s3:PutObject` on the bucket/prefix. On B2, use a key with `writeFiles` only.
-sss3 has no write-only credential, so its public proxy must enforce the
-CopyObject block instead. Do not assume B2, R2, MinIO, or NooBaa rejects an
-unsigned `X-Amz-Copy-Source`; use write-only upload credentials and/or a proxy
-rule, and verify the provider's behavior.
+Multipart requires either write-only upload credentials or
+`S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true` for a proxy that rejects copy headers.
+sss3 has no write-only credential, so its public proxy must enforce the block;
+the checked-in Caddy config does this. Do not assume B2, R2, MinIO, or NooBaa
+rejects an unsigned `X-Amz-Copy-Source`; verify the provider's behavior.
+
+`MULTIPART_SIGN_PART_LENGTH=true` signs each part's exact Content-Length.
+Completion also calls `ListParts` and compares provider-reported sizes and
+ETags against the recorded parts before assembly. The main read/write identity
+therefore needs `ListParts` and `ListBucketMultipartUploads` in addition to the
+existing object permissions; the write-only upload identity does not.
 
 ## Required bucket CORS
 

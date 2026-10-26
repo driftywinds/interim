@@ -267,7 +267,7 @@ paths:
       tags: [Uploads]
       operationId: reportUploadPart
       summary: Record a multipart part ETag
-      description: Requires X-Upload-Token. Records the ETag and size returned by the part PUT.
+      description: Requires X-Upload-Token. Records the ETag and exact size returned by the part PUT. Non-final parts must equal part_size; the final part must equal the remaining bytes.
       parameters:
         - $ref: "#/components/parameters/UploadID"
         - $ref: "#/components/parameters/UploadToken"
@@ -310,11 +310,12 @@ paths:
       operationId: completeUpload
       summary: Verify and commit an uploaded object
       description: |
-        Requires X-Upload-Token. In multipart mode, assembles the reported parts
-        first. Then performs a HEAD on the staging object, verifies actual size
-        against the declared size and configured cap, copies it to an unexposed
-        live key, consumes the quota reservation, and inserts the file record.
-        Retrying a committed upload returns the existing file.
+        Requires X-Upload-Token. In multipart mode, verifies provider-side part
+        sizes/ETags, assembles the reported parts, and uses the staging key as
+        the live object. Single PUTs are copied to an unexposed live key. Then
+        performs a HEAD, verifies actual size against the declared size and
+        configured cap, consumes the quota reservation, and inserts the file
+        record. Retrying a committed upload returns the existing file.
       parameters:
         - $ref: "#/components/parameters/UploadID"
         - $ref: "#/components/parameters/UploadToken"
@@ -354,7 +355,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "413":
-          description: Actual object is larger than declared or allowed.
+          description: Actual object is larger than declared or allowed, or a provider part does not match its declared size.
           content:
             application/json:
               schema:
@@ -584,9 +585,13 @@ components:
         part_size:
           type: integer
           format: int64
-          description: Multipart part size in bytes.
+          minimum: 5242880
+          maximum: 5368709120
+          description: Multipart part size in bytes. The server may raise the configured value to stay under 10,000 parts.
         part_count:
           type: integer
+          minimum: 1
+          maximum: 10000
           description: Number of parts required for a multipart upload.
         concurrency:
           type: integer

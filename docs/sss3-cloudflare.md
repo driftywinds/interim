@@ -4,9 +4,11 @@ This is the small-file route. Cloudflare caps proxied request bodies at about
 100 MB. If the home machine is behind restrictive NAT/CGNAT and you want files
 larger than that, use the [Tailscale-only route](tailscale-sss3.md) instead.
 
-Upgrade note: completion now performs a server-side `CopyObject` from a staging
-key to an unexposed live key. `S3_ENDPOINT` must reach sss3 directly, not
-through the public Caddy listener, because that listener blocks `CopyObject`.
+Upgrade note: single-PUT completion performs a server-side `CopyObject` from a
+staging key to an unexposed live key. Multipart completion uses the staging key
+as the live object and avoids that copy. `S3_ENDPOINT` must still reach sss3
+directly, not through the public Caddy listener, because that listener blocks
+`CopyObject` for single PUTs.
 
 ## Checked-in sss3 stack
 
@@ -63,12 +65,21 @@ S3_PUBLIC_ENDPOINT=https://sss3.drifty.win
 S3_REGION=us-east-1
 S3_BUCKET=interim
 S3_FORCE_PATH_STYLE=true
+S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true
 ```
 
 `S3_ENDPOINT` must not point at the public Caddy listener: that listener blocks
-`CopyObject`, which completion needs for the staging-to-live copy. Put interim
-on the same Docker network as this stack, or otherwise give it a direct/private
-route to sss3. Keep `S3_PUBLIC_ENDPOINT` on the public Caddy hostname.
+`CopyObject`. Put interim on the same Docker network as this stack, or otherwise
+give it a direct/private route to sss3. Keep `S3_PUBLIC_ENDPOINT` on the public
+Caddy hostname.
+
+If multipart is enabled and sss3 rejects normal part PUTs with
+`SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` and keep
+`STUPID_MAX_PART_SIZE` at or below interim's `MULTIPART_PART_SIZE`. The checked-in
+Compose file defaults the provider cap to 16 MiB; raise both values together if
+you need an automatically larger part size for very large files. Raise
+`STUPID_MAX_OBJECT_SIZE` above its 5 GiB default when `MAX_FILE_SIZE` exceeds
+5 GB.
 
 ## Cloudflare constraints
 
@@ -80,8 +91,10 @@ matter for this deployment:
   until a CORS-capable reverse proxy or Worker handles `OPTIONS` and adds the
   headers. See the Caddy example below.
 - **Cloudflare body limit.** Cloudflare Free/Pro caps proxied request bodies at
-  about 100 MB. Keep `MAX_FILE_SIZE` below that, or bypass Cloudflare for the S3
-  hostname. interim does not implement multipart uploads.
+  about 100 MB. Multipart uploads split files into separate requests, so each
+  part must stay below that limit; the default 16 MiB part size is safe. Keep
+  `MULTIPART_PART_SIZE` below the Cloudflare cap, or bypass Cloudflare for the
+  S3 hostname.
 - **Presigned PUT from non-browser clients can hit Cloudflare error 1010.**
   Cloudflare browser-integrity checks may reject a scripted presigned PUT even
   though interim's own signed SDK requests succeed; browser uploads are
@@ -115,6 +128,24 @@ copy-operation matchers must come before the `handle` blocks:
 
     @copyrange header X-Amz-Copy-Source-Range *
     respond @copyrange "CopyPart is not allowed on the public endpoint" 403
+
+    @amzacl header X-Amz-Acl *
+    respond @amzacl "ACL headers are not allowed on the public endpoint" 403
+
+    @amztagging header X-Amz-Tagging *
+    respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
+
+    @amzmetadata header X-Amz-Metadata-Directive *
+    respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
+
+    @amzlockmode header X-Amz-Object-Lock-Mode *
+    respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
+
+    @amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
+    respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
+
+    @amzlockhold header X-Amz-Object-Lock-Legal-Hold *
+    respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
 
     @options method OPTIONS
     handle @options {
