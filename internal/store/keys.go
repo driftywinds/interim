@@ -10,9 +10,9 @@ import (
 
 func (s *Store) CreateAPIKey(ctx context.Context, key APIKey) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		key.ID, key.KeyHash, key.Prefix, key.Name, toUnix(key.CreatedAt),
+		`INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at, disabled, approved)
+		 VALUES (?, ?, ?, ?, ?, 0, ?)`,
+		key.ID, key.KeyHash, key.Prefix, key.Name, toUnix(key.CreatedAt), boolInt(key.Approved),
 	)
 	if err != nil {
 		return fmt.Errorf("create api key: %w", err)
@@ -24,12 +24,12 @@ func (s *Store) APIKeyByHash(ctx context.Context, hash []byte) (APIKey, error) {
 	var key APIKey
 	var created int64
 	var lastUsed sql.NullInt64
-	var disabled int
+	var disabled, approved int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved
 		 FROM api_keys WHERE key_hash = ?`,
 		hash,
-	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled)
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -39,6 +39,7 @@ func (s *Store) APIKeyByHash(ctx context.Context, hash []byte) (APIKey, error) {
 	key.CreatedAt = scanTime(created)
 	key.LastUsedAt = nullableUnix(lastUsed)
 	key.Disabled = disabled == 1
+	key.Approved = approved == 1
 	return key, nil
 }
 
@@ -46,12 +47,12 @@ func (s *Store) APIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var key APIKey
 	var created int64
 	var lastUsed sql.NullInt64
-	var disabled int
+	var disabled, approved int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved
 		 FROM api_keys WHERE id = ?`,
 		id,
-	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled)
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -61,6 +62,7 @@ func (s *Store) APIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	key.CreatedAt = scanTime(created)
 	key.LastUsedAt = nullableUnix(lastUsed)
 	key.Disabled = disabled == 1
+	key.Approved = approved == 1
 	return key, nil
 }
 
@@ -87,7 +89,7 @@ func (s *Store) APIKeyUsage(ctx context.Context, id string) (APIKeyUsage, error)
 
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT k.id, k.key_hash, k.key_prefix, k.name, k.created_at, k.last_used_at, k.disabled,
+		`SELECT k.id, k.key_hash, k.key_prefix, k.name, k.created_at, k.last_used_at, k.disabled, k.approved,
 		        COUNT(f.id), COALESCE(SUM(f.size), 0)
 		 FROM api_keys k
 		 LEFT JOIN files f ON f.api_key_id = k.id
@@ -104,9 +106,9 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		var key APIKey
 		var created int64
 		var lastUsed sql.NullInt64
-		var disabled int
+		var disabled, approved int
 		if err := rows.Scan(
-			&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled,
+			&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved,
 			&key.FileCount, &key.FileBytes,
 		); err != nil {
 			return nil, fmt.Errorf("scan api key: %w", err)
@@ -114,6 +116,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		key.CreatedAt = scanTime(created)
 		key.LastUsedAt = nullableUnix(lastUsed)
 		key.Disabled = disabled == 1
+		key.Approved = approved == 1
 		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
@@ -123,11 +126,16 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 }
 
 func (s *Store) SetAPIKeyDisabled(ctx context.Context, id string, disabled bool) error {
-	value := 0
-	if disabled {
-		value = 1
-	}
-	result, err := s.db.ExecContext(ctx, "UPDATE api_keys SET disabled = ? WHERE id = ?", value, id)
+	return s.updateAPIKeyFlag(ctx, id, "disabled", disabled)
+}
+
+func (s *Store) SetAPIKeyApproved(ctx context.Context, id string, approved bool) error {
+	return s.updateAPIKeyFlag(ctx, id, "approved", approved)
+}
+
+func (s *Store) updateAPIKeyFlag(ctx context.Context, id, column string, value bool) error {
+	// The column name is internal and never comes from a request.
+	result, err := s.db.ExecContext(ctx, "UPDATE api_keys SET "+column+" = ? WHERE id = ?", boolInt(value), id)
 	if err != nil {
 		return fmt.Errorf("update api key: %w", err)
 	}
@@ -139,4 +147,11 @@ func (s *Store) SetAPIKeyDisabled(ctx context.Context, id string, disabled bool)
 		return ErrNotFound
 	}
 	return nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

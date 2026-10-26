@@ -56,12 +56,36 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply sqlite schema: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+	if err := migrate(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
 
 	return &Store{db: db}, nil
+}
+
+// migrate adds columns that cannot be introduced with CREATE TABLE IF NOT
+// EXISTS. Existing user hashes deliberately start unapproved: enabling the
+// upload allowlist must not silently authorize hashes created earlier.
+func migrate(ctx context.Context, db *sql.DB) error {
+	var approvedColumns int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'approved'`,
+	).Scan(&approvedColumns); err != nil {
+		return fmt.Errorf("inspect api_keys schema: %w", err)
+	}
+	if approvedColumns == 0 {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE api_keys ADD COLUMN approved INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))`,
+		); err != nil {
+			return fmt.Errorf("add api_keys.approved: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {

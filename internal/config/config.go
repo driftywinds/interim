@@ -48,6 +48,8 @@ type Config struct {
 	UploadURLTTL    time.Duration
 	UploadIntentTTL time.Duration
 
+	PublicUploadsEnabled bool
+
 	DownloadWorkerEnabled bool
 	DownloadWorkerURLs    []string
 	DownloadWorkerSecret  string
@@ -159,6 +161,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	publicUploadsEnabled, err := parseBool("PUBLIC_UPLOADS_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+
 	downloadWorkerEnabled, err := parseBool("DOWNLOAD_WORKER_ENABLED", false)
 	if err != nil {
 		return Config{}, err
@@ -200,6 +207,7 @@ func Load() (Config, error) {
 		DownloadTTL:           downloadTTL,
 		UploadURLTTL:          uploadURLTTL,
 		UploadIntentTTL:       uploadIntentTTL,
+		PublicUploadsEnabled:  publicUploadsEnabled,
 		DownloadWorkerEnabled: downloadWorkerEnabled,
 		DownloadWorkerURLs:    downloadWorkerURLs,
 		DownloadWorkerSecret:  downloadWorkerSecret,

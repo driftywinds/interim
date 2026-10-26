@@ -85,6 +85,7 @@ func main() {
 			"upload_url_ttl", cfg.UploadURLTTL.String(),
 			"upload_intent_ttl", cfg.UploadIntentTTL.String(),
 			"retention", cfg.Retention.String(),
+			"public_uploads", cfg.PublicUploadsEnabled,
 			"bucket", cfg.S3.Bucket,
 			"download_worker", cfg.DownloadWorkerEnabled,
 			"download_workers", len(cfg.DownloadWorkerURLs),

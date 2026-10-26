@@ -112,16 +112,17 @@ type testEnv struct {
 func newTestEnv(t *testing.T, maxStorage, maxFile int64) *testEnv {
 	t.Helper()
 	cfg := config.Config{
-		PublicBaseURL:   "https://files.test",
-		ListenAddr:      ":0",
-		MaxStorage:      maxStorage,
-		MaxFileSize:     maxFile,
-		Retention:       7 * 24 * time.Hour,
-		DownloadTTL:     5 * time.Minute,
-		UploadURLTTL:    30 * time.Minute,
-		UploadIntentTTL: 45 * time.Minute,
-		SessionTTL:      time.Hour,
-		CookieSecure:    false,
+		PublicBaseURL:        "https://files.test",
+		ListenAddr:           ":0",
+		MaxStorage:           maxStorage,
+		MaxFileSize:          maxFile,
+		Retention:            7 * 24 * time.Hour,
+		DownloadTTL:          5 * time.Minute,
+		UploadURLTTL:         30 * time.Minute,
+		UploadIntentTTL:      45 * time.Minute,
+		PublicUploadsEnabled: true,
+		SessionTTL:           time.Hour,
+		CookieSecure:         false,
 		S3: config.S3Config{
 			Prefix:         "files/",
 			Bucket:         "test",
@@ -152,7 +153,10 @@ func newTestEnv(t *testing.T, maxStorage, maxFile int64) *testEnv {
 	return &testEnv{server: app, store: st, fake: fake, http: httpServer, client: client}
 }
 
-var csrfPattern = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
+var (
+	csrfPattern   = regexp.MustCompile(`name="csrf_token" value="([^"]+)"`)
+	newKeyPattern = regexp.MustCompile(`id="new-key-value">([^<]+)</code>`)
+)
 
 func extractCSRF(t *testing.T, body string) string {
 	t.Helper()
@@ -403,6 +407,158 @@ func TestPublicPagesAndAdminSetup(t *testing.T) {
 	status, body = getBody(t, env.client, env.http.URL+"/admin")
 	if status != http.StatusOK || !bytes.Contains([]byte(body), []byte("All files")) {
 		t.Fatalf("admin after setup status = %d", status)
+	}
+}
+
+func TestRestrictedUploadsRequireAdminApprovedHash(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.setupAdmin(t)
+	unapprovedID, unapprovedHash := env.createKey(t)
+	env.server.cfg.PublicUploadsEnabled = false
+
+	status, home := getBody(t, env.client, env.http.URL+"/")
+	if status != http.StatusOK {
+		t.Fatalf("restricted home status = %d", status)
+	}
+	for _, needle := range []string{"Restricted uploads", `data-public-uploads="false"`, `id="upload-gate"`, "Enter the user hash"} {
+		if !bytes.Contains([]byte(home), []byte(needle)) {
+			t.Errorf("restricted home missing %q", needle)
+		}
+	}
+	if bytes.Contains([]byte(home), []byte(`id="create-user-hash"`)) {
+		t.Error("restricted home should not offer public user-hash creation")
+	}
+
+	status, statusBody := getBody(t, env.client, env.http.URL+"/api/v1/status")
+	if status != http.StatusOK || !bytes.Contains([]byte(statusBody), []byte(`"public_uploads":false`)) {
+		t.Fatalf("status = %d: %s", status, statusBody)
+	}
+	status, apiDocs := getBody(t, env.client, env.http.URL+"/api")
+	if status != http.StatusOK || !bytes.Contains([]byte(apiDocs), []byte("Public user-hash creation is disabled")) {
+		t.Fatalf("restricted API docs = %d", status)
+	}
+
+	response, err := env.client.Post(env.http.URL+"/api/v1/keys", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || !bytes.Contains(keyBody, []byte(`"key_creation_disabled"`)) {
+		t.Fatalf("public key creation = %d: %s", response.StatusCode, keyBody)
+	}
+
+	status, intentBody, _ := env.createIntent(t, "", "anonymous.bin", 1, "")
+	if status != http.StatusUnauthorized || !bytes.Contains(intentBody, []byte(`"uploads_restricted"`)) {
+		t.Fatalf("anonymous restricted upload = %d: %s", status, intentBody)
+	}
+	status, intentBody, _ = env.createIntent(t, unapprovedHash, "unapproved.bin", 1, "")
+	if status != http.StatusForbidden || !bytes.Contains(intentBody, []byte(`"upload_not_allowed"`)) {
+		t.Fatalf("unapproved upload = %d: %s", status, intentBody)
+	}
+
+	status, adminBody := getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK || !bytes.Contains([]byte(adminBody), []byte("Public uploads are disabled")) {
+		t.Fatalf("admin status = %d", status)
+	}
+	csrf := extractCSRF(t, adminBody)
+	response, err = env.client.PostForm(env.http.URL+"/admin/keys/create", url.Values{
+		"csrf_token": {csrf},
+		"name":       {"approved person"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("admin create key status = %d", response.StatusCode)
+	}
+
+	status, adminBody = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin page after key creation = %d", status)
+	}
+	match := newKeyPattern.FindStringSubmatch(adminBody)
+	if match == nil {
+		t.Fatal("newly generated user hash was not shown once on the admin page")
+	}
+	adminHash := match[1]
+	if !strings.HasPrefix(adminHash, "interim_") {
+		t.Fatalf("generated hash = %q", adminHash)
+	}
+	if !bytes.Contains([]byte(adminBody), []byte(`action="/admin/keys/create"`)) {
+		t.Error("admin page missing generate form")
+	}
+
+	status, intentBody, _ = env.createIntent(t, adminHash, "approved.bin", 1, "")
+	if status != http.StatusCreated {
+		t.Fatalf("admin-approved upload = %d: %s", status, intentBody)
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, env.http.URL+"/api/v1/keys/me", nil)
+	request.Header.Set("Authorization", "Bearer "+adminHash)
+	keyResponse, err := env.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.NewDecoder(keyResponse.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	keyResponse.Body.Close()
+	if keyResponse.StatusCode != http.StatusOK || !info.Approved {
+		t.Fatalf("admin key info = %d approved=%v", keyResponse.StatusCode, info.Approved)
+	}
+
+	status, repeatBody := getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin page reload = %d", status)
+	}
+	if newKeyPattern.MatchString(repeatBody) {
+		t.Error("newly generated user hash was shown again after the one-time flash")
+	}
+
+	status, adminBody = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin page before approval = %d", status)
+	}
+	csrf = extractCSRF(t, adminBody)
+	response, err = env.client.PostForm(env.http.URL+"/admin/keys/update", url.Values{
+		"csrf_token": {csrf},
+		"id":         {unapprovedID},
+		"action":     {"approve"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("approve status = %d", response.StatusCode)
+	}
+	status, intentBody, _ = env.createIntent(t, unapprovedHash, "now-approved.bin", 1, "")
+	if status != http.StatusCreated {
+		t.Fatalf("approved upload = %d: %s", status, intentBody)
+	}
+
+	status, adminBody = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin page before unapproval = %d", status)
+	}
+	csrf = extractCSRF(t, adminBody)
+	response, err = env.client.PostForm(env.http.URL+"/admin/keys/update", url.Values{
+		"csrf_token": {csrf},
+		"id":         {unapprovedID},
+		"action":     {"unapprove"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	status, intentBody, _ = env.createIntent(t, unapprovedHash, "unapproved-again.bin", 1, "")
+	if status != http.StatusForbidden || !bytes.Contains(intentBody, []byte(`"upload_not_allowed"`)) {
+		t.Fatalf("unapproved upload after removal = %d: %s", status, intentBody)
 	}
 }
 

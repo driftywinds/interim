@@ -28,6 +28,7 @@ type APIKey struct {
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 	Disabled   bool
+	Approved   bool
 	FileCount  int64
 	FileBytes  int64
 }

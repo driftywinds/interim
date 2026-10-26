@@ -43,6 +43,16 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "The supplied user hash is invalid or revoked.")
 		return
 	}
+	if !s.cfg.PublicUploadsEnabled {
+		if key == nil {
+			s.writeAPIError(w, r, http.StatusUnauthorized, "uploads_restricted", "Uploads are restricted to approved user hashes. Ask the admin for a user hash.")
+			return
+		}
+		if !key.Approved {
+			s.writeAPIError(w, r, http.StatusForbidden, "upload_not_allowed", "This user hash is valid but is not approved for uploads.")
+			return
+		}
+	}
 	ip := s.clientIP(r)
 	if allowed, retry := s.limiter.allow("uploadintent:"+ip, 120, 10*time.Minute); !allowed {
 		w.Header().Set("Retry-After", retryString(retry))

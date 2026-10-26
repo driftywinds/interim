@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     name         TEXT NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER,
-    disabled     INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1))
+    disabled     INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    approved     INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS files (

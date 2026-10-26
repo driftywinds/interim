@@ -9,6 +9,13 @@
     </form>
 </nav>
 
+{{if not .PublicUploads}}
+<div class="warn" role="note">
+    <p class="lede">Public uploads are disabled.</p>
+    <p>Only user hashes approved here can upload. Public user-hash creation is disabled; generate hashes below and send them to the people who need access.</p>
+</div>
+{{end}}
+
 <fieldset class="admin-section">
     <legend>Storage</legend>
     <div class="stat-grid">
@@ -91,9 +98,25 @@
 <fieldset class="admin-section" id="keys">
     <legend>User hashes</legend>
     <p class="muted">Only prefixes are stored for display. Raw hashes cannot be recovered by anyone, including the admin.</p>
+    <p class="muted">Approval controls upload access when <code>PUBLIC_UPLOADS_ENABLED=false</code>. Revoking a hash disables authentication everywhere.</p>
+
+    <form method="post" action="/admin/keys/create" class="search-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label for="key-name">New user hash</label>
+        <input type="text" id="key-name" name="name" maxlength="64" placeholder="Label (optional)">
+        <button type="submit">Generate user hash</button>
+    </form>
+
+    {{if .NewKey}}
+    <div class="key-reveal" role="status">
+        <p><strong>New user hash{{if .NewKeyName}} for {{.NewKeyName}}{{end}}</strong> — copy it now. It cannot be shown again.</p>
+        <pre><code id="new-key-value">{{.NewKey}}</code></pre>
+    </div>
+    {{end}}
+
     <div class="table-wrap">
         <table class="fs admin-table">
-            <thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th>Files</th><th>Bytes</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th>Files</th><th>Bytes</th><th>Status</th><th>Upload access</th><th></th></tr></thead>
             <tbody>
             {{range .Keys}}
                 <tr>
@@ -104,17 +127,26 @@
                     <td>{{.FileCount}}</td>
                     <td>{{bytes .FileBytes}}</td>
                     <td>{{if .Disabled}}<span class="text-danger">revoked</span>{{else}}active{{end}}</td>
+                    <td>{{if .Approved}}<span class="text-success">approved</span>{{else}}<span class="muted">not approved</span>{{end}}</td>
                     <td>
-                        <form method="post" action="/admin/keys/revoke" class="inline-form" data-confirm="{{if .Disabled}}Restore this user hash?{{else}}Revoke this user hash? Existing files remain, but the hash can no longer authenticate.{{end}}">
-                            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
-                            <input type="hidden" name="id" value="{{.ID}}">
-                            <input type="hidden" name="action" value="{{if .Disabled}}restore{{else}}revoke{{end}}">
-                            <button type="submit" class="link-button">{{if .Disabled}}Restore{{else}}Revoke{{end}}</button>
-                        </form>
+                        <div class="row-actions">
+                            <form method="post" action="/admin/keys/update" class="inline-form" data-confirm="{{if .Approved}}Remove upload approval from this user hash?{{else}}Approve this user hash for uploads?{{end}}">
+                                <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <input type="hidden" name="action" value="{{if .Approved}}unapprove{{else}}approve{{end}}">
+                                <button type="submit" class="link-button">{{if .Approved}}Unapprove{{else}}Approve{{end}}</button>
+                            </form>
+                            <form method="post" action="/admin/keys/update" class="inline-form" data-confirm="{{if .Disabled}}Restore this user hash?{{else}}Revoke this user hash? Existing files remain, but the hash can no longer authenticate.{{end}}">
+                                <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <input type="hidden" name="action" value="{{if .Disabled}}restore{{else}}revoke{{end}}">
+                                <button type="submit" class="link-button">{{if .Disabled}}Restore{{else}}Revoke{{end}}</button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
             {{else}}
-                <tr><td colspan="8" class="muted">No user hashes have been created.</td></tr>
+                <tr><td colspan="9" class="muted">No user hashes have been created.</td></tr>
             {{end}}
             </tbody>
         </table>

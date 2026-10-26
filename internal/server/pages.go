@@ -19,7 +19,11 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page := s.basePage(r, "Temporary file hosting", "home")
-	page.Description = fmt.Sprintf("interim is a temporary file host. Upload anonymously or with a user hash. Every file is permanently deleted after %s.", page.RetentionLabel)
+	if s.cfg.PublicUploadsEnabled {
+		page.Description = fmt.Sprintf("interim is a temporary file host. Upload anonymously or with a user hash. Every file is permanently deleted after %s.", page.RetentionLabel)
+	} else {
+		page.Description = fmt.Sprintf("interim is a temporary file host. Uploads require an admin-approved user hash. Every file is permanently deleted after %s.", page.RetentionLabel)
+	}
 	s.render(w, r, http.StatusOK, "home", HomeView{PageData: page, Status: status})
 }
 
@@ -102,6 +106,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 		MaxFileSize:      units.FormatBytes(s.cfg.MaxFileSize),
 		MaxStorage:       units.FormatBytes(s.cfg.MaxStorage),
 		StorageUnlimited: s.cfg.MaxStorage == 0,
+		PublicUploads:    s.cfg.PublicUploadsEnabled,
 		DownloadTTL:      humanDuration(s.cfg.DownloadTTL),
 		UploadURLTTL:     humanDuration(s.cfg.UploadURLTTL),
 	}

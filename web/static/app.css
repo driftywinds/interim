@@ -254,6 +254,10 @@ legend {
     color: var(--danger);
 }
 
+.text-success {
+    color: var(--success);
+}
+
 .hint {
     color: var(--muted);
     font-size: 90%;
@@ -290,6 +294,59 @@ legend {
 .upload-zone.dragging {
     border-color: var(--accent);
     background: var(--notice-bg);
+}
+
+.upload-zone.disabled {
+    opacity: 0.55;
+}
+
+.upload-gate {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 3px;
+    background: var(--notice-bg);
+    padding: 12px 14px;
+    margin: 18px 0;
+}
+
+.upload-gate h2 {
+    margin: 0 0 4px;
+    font-size: 1.15rem;
+}
+
+.upload-gate form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 10px 0;
+}
+
+.upload-gate input {
+    flex: 1 1 20rem;
+    min-width: 0;
+}
+
+.upload-auth-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin: 14px 0 0;
+    padding: 8px 12px;
+    border-left: 4px solid var(--success);
+    background: var(--notice-bg);
+}
+
+.key-reveal {
+    border-left: 4px solid var(--success);
+    background: var(--notice-bg);
+    padding: 10px 14px;
+    margin: 14px 0;
+}
+
+.key-reveal p {
+    margin-top: 0;
 }
 
 .upload-actions,
@@ -691,7 +748,7 @@ input[type="radio"] {
 }
 
 .admin-table {
-    min-width: 44rem;
+    min-width: 52rem;
 }
 
 .admin-table td {

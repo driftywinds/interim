@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: interim API
-  version: 2.0.0
+  version: 2.1.0
   description: |
     interim is a temporary file host. Files expire after the instance's
     configured retention period (7 days by default). Uploads are direct to
@@ -9,6 +9,9 @@ info:
     URL, the client uploads the bytes, then interim verifies the object and
     commits the file record. Download URLs are short-lived: either signed S3
     GET URLs or worker-proxied token URLs, depending on the instance.
+    Upload intents are public by default. When public uploads are disabled,
+    only admin-approved user hashes may create them and public user-hash
+    creation is unavailable.
   contact:
     name: interim
 servers:
@@ -41,7 +44,7 @@ paths:
       tags: [Auth]
       operationId: createUserHash
       summary: Create a user hash
-      description: Creates a bearer credential. The raw hash is returned once and never stored in plaintext.
+      description: Creates a bearer credential. The raw hash is returned once and never stored in plaintext. Disabled when public uploads are off; new hashes are unapproved for restricted uploads until an admin approves them.
       requestBody:
         required: false
         content:
@@ -59,6 +62,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreatedKey"
+        "403":
+          description: Public user-hash creation is disabled because uploads are restricted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/RateLimited"
   /api/v1/keys/me:
@@ -84,9 +93,11 @@ paths:
       summary: Reserve quota and sign a PUT URL
       description: |
         Validates the declared name and size, reserves storage atomically, and
-        returns a short-lived presigned PUT URL. Authentication is optional.
-        The client must PUT exactly to the returned URL with the returned
-        headers, then call the complete endpoint.
+        returns a short-lived presigned PUT URL. Authentication is optional
+        when public uploads are enabled. When public uploads are disabled, a
+        valid, non-revoked, admin-approved user hash is required. The client
+        must PUT exactly to the returned URL with the returned headers, then
+        call the complete endpoint.
       security:
         - bearerAuth: []
         - {}
@@ -118,6 +129,18 @@ paths:
                 $ref: "#/components/schemas/UploadIntent"
         "400":
           description: Invalid name or size.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Public uploads are disabled and no valid user hash was supplied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Public uploads are disabled and the user hash is not approved.
           content:
             application/json:
               schema:
@@ -462,7 +485,7 @@ components:
           $ref: "#/components/schemas/File"
     CreatedKey:
       type: object
-      required: [id, user_hash, key_prefix, created_at, warning]
+      required: [id, user_hash, key_prefix, approved, created_at, warning]
       properties:
         id:
           type: string
@@ -473,6 +496,9 @@ components:
           type: string
         name:
           type: string
+        approved:
+          type: boolean
+          description: Whether the hash may create uploads when public uploads are disabled.
         created_at:
           type: string
           format: date-time
@@ -480,7 +506,7 @@ components:
           type: string
     KeyInfo:
       type: object
-      required: [id, key_prefix, created_at, files, bytes]
+      required: [id, key_prefix, approved, created_at, files, bytes]
       properties:
         id:
           type: string
@@ -488,6 +514,9 @@ components:
           type: string
         name:
           type: string
+        approved:
+          type: boolean
+          description: Whether the hash may create uploads when public uploads are disabled.
         created_at:
           type: string
           format: date-time
@@ -526,10 +555,13 @@ components:
           type: boolean
     Status:
       type: object
-      required: [accepting_uploads, storage, retention_seconds, retention_human, max_file_size_bytes, download_url_ttl_seconds, server_time]
+      required: [accepting_uploads, public_uploads, storage, retention_seconds, retention_human, max_file_size_bytes, download_url_ttl_seconds, server_time]
       properties:
         accepting_uploads:
           type: boolean
+        public_uploads:
+          type: boolean
+          description: False when uploads require an admin-approved user hash.
         storage:
           type: object
           required: [files, used_bytes, reserved_bytes, limit_bytes, available_bytes, used_percent, unlimited]

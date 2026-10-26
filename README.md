@@ -1,16 +1,20 @@
 # interim
 
-Temporary file hosting on S3-compatible storage. Uploads are public by default,
-every file expires after the configured `RETENTION` period (7 days by default),
-and downloads are served through short-lived URLs from a private bucket.
+Temporary file hosting on S3-compatible storage. Uploads are public by default
+and can be locked down to admin-approved user hashes with
+`PUBLIC_UPLOADS_ENABLED=false`. Every file expires after the configured
+`RETENTION` period (7 days by default), and downloads are served through
+short-lived URLs from a private bucket.
 
 Built in Go with SQLite metadata, a server-rendered web UI, a full REST API, and
 Docker as the primary deployment target.
 
 ## Features
 
-- Anonymous uploads with no account.
-- User hashes (`interim_…`) that act as bearer API keys.
+- Anonymous uploads with no account, or an admin-approved upload allowlist
+  when `PUBLIC_UPLOADS_ENABLED=false`.
+- User hashes (`interim_…`) that act as bearer API keys; admins can generate
+  them, approve upload access, and revoke them.
 - Direct browser-to-S3 uploads through short-lived presigned PUT URLs. File
   bytes never pass through the interim server.
 - Configurable retention via `RETENTION` (default `7d`), enforced by metadata
@@ -403,6 +407,7 @@ automatically for local runs, and Compose uses it via `env_file`.
 | `S3_FORCE_PATH_STYLE` | no | `true` | Keep true for sss3/MinIO/Garage; false for AWS. |
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
+| `PUBLIC_UPLOADS_ENABLED` | no | `true` | `false` restricts upload intents to admin-approved user hashes and disables public hash creation. Existing hashes start unapproved. |
 | `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT URL lifetime. 5m–2h. |
 | `UPLOAD_INTENT_TTL` | no | `45m` | Deadline for completion; must be at least `UPLOAD_URL_TTL`. Max 6h. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
@@ -647,8 +652,15 @@ longer than its upload window.
 Start at `/api` for the rendered documentation or `/api/openapi.json` for the
 OpenAPI 3.1 document. Examples use `PUBLIC_BASE_URL`.
 
+By default, upload intents are public. Set `PUBLIC_UPLOADS_ENABLED=false` to
+require an admin-approved user hash. In that mode `POST /api/v1/keys` is
+disabled, and every existing or self-created hash stays unapproved until an
+admin approves it in `/admin`. Anonymous uploads return
+`401 uploads_restricted`; a valid but unapproved hash returns
+`403 upload_not_allowed`. Completion and abort still use only the upload token.
+
 ```sh
-# Create a user hash (shown once)
+# Create a user hash (shown once; public mode only)
 curl -X POST https://files.example.com/api/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"cli"}'
@@ -686,9 +698,9 @@ SHA-256 hashes.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/api/v1/keys` | no | Create user hash. |
-| `GET` | `/api/v1/keys/me` | bearer | Key prefix and usage. |
-| `POST` | `/api/v1/uploads` | optional | Reserve quota and sign a PUT URL. |
+| `POST` | `/api/v1/keys` | no | Create user hash. Disabled when public uploads are off. |
+| `GET` | `/api/v1/keys/me` | bearer | Key prefix, approval, and usage. |
+| `POST` | `/api/v1/uploads` | optional; approved when restricted | Reserve quota and sign a PUT URL. |
 | `POST` | `/api/v1/uploads/{id}/complete` | upload token | Verify and commit the object. |
 | `DELETE` | `/api/v1/uploads/{id}` | upload token | Abort a pending upload and release quota. |
 | `GET` | `/api/v1/files` | bearer | List the caller's active files. |
@@ -713,6 +725,15 @@ including the one-time delete token. Only that browser can see the list.
 Clearing site data loses the local delete ability, but the file still expires
 after the configured `RETENTION` period and the admin can delete it.
 
+When `PUBLIC_UPLOADS_ENABLED=false`, the home page asks for an admin-issued
+user hash. It validates the hash with `GET /api/v1/keys/me`, requires
+`approved: true`, and stores it in `localStorage` under
+`interim.uploadHash.v1`. Future upload intents send it as a bearer token.
+Invalid, revoked, or unapproved hashes clear the saved value and reopen the
+prompt. The “Forget” button removes it from the browser. The hash is never put
+in a URL or log line. Anyone with access to that browser profile can read the
+stored value, so treat it like a password.
+
 The download page never receives or displays the delete token. Its download
 button links to a server endpoint that creates a fresh download link and
 redirects to it. Direct object URLs do not exist in the HTML.
@@ -725,8 +746,10 @@ admin can:
 - see storage usage, the hard cap, active reservations, and every file;
 - search by filename or ID and paginate;
 - open files, delete one file, or select and bulk-delete (S3 object first);
-- inspect user-hash prefixes, usage, and last-used time;
-- revoke/restore user hashes without exposing the raw hash.
+- generate an approved user hash for someone and show it once;
+- inspect user-hash prefixes, approval, usage, and last-used time;
+- approve/unapprove uploads and revoke/restore authentication without exposing
+  the raw hash.
 
 Admin POSTs are CSRF-protected. Login is rate-limited. Passwords are bcrypt
 hashes (cost 12). There is intentionally only one admin account.
@@ -744,8 +767,9 @@ go run ./cmd/interim
 The test suite uses an in-memory fake object store and covers setup, auth,
 upload-intent creation, idempotent completion, direct upload verification,
 ownership, quota rejection, abort, janitor expiry, orphan sweeping, expiry
-cleanup, and admin deletion. S3 integration, CORS, and presigned PUT behaviour
-must be tested against your provider.
+cleanup, admin deletion, restricted-upload enforcement, admin-generated hashes,
+approval changes, and the legacy-schema migration. S3 integration, CORS, and
+presigned PUT behaviour must be tested against your provider.
 
 Build the binary directly:
 
@@ -781,6 +805,9 @@ CGO_ENABLED=0 go build -trimpath -o bin/interim ./cmd/interim
 - Download links are short-lived signed S3 GETs or worker-proxied token URLs;
   objects are private.
 - User hashes, upload tokens, and delete tokens are hashed at rest.
+- With public uploads disabled, upload intents require a valid, non-revoked,
+  admin-approved hash. Existing hashes are not grandfathered in; approval is an
+  explicit admin action.
 - Uploads are capped and capacity-reserved before signing. Actual object size is
   verified with `HeadObject` before a file is committed.
 - Admin cookies are HttpOnly, SameSite=Lax, Secure when configured, and backed

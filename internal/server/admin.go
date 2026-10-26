@@ -1,17 +1,24 @@
 package server
 
 import (
+	"crypto/hmac"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"interim/internal/store"
 )
 
-const adminPageSize = 50
+const (
+	adminPageSize = 50
+	keyFlashTTL   = 2 * time.Minute
+)
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	hasAdmin, err := s.store.HasAdmin(r.Context())
@@ -80,6 +87,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	flash, hasKeyFlash := s.takeKeyFlash(w, r)
+
 	page := s.basePage(r, "Admin", "admin")
 	page.IsAdmin = true
 	page.AdminName = session.Username
@@ -88,19 +97,24 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	page.NoIndex = true
 
 	view := AdminView{
-		PageData:  page,
-		Usage:     usage,
-		Percent:   percent,
-		Unlimited: s.cfg.MaxStorage == 0,
-		Files:     files,
-		Keys:      keys,
-		Total:     total,
-		Page:      pageNumber,
-		Pages:     pages,
-		Query:     query,
-		PrevURL:   prevURL,
-		NextURL:   nextURL,
-		Now:       s.now(),
+		PageData:      page,
+		Usage:         usage,
+		Percent:       percent,
+		Unlimited:     s.cfg.MaxStorage == 0,
+		Files:         files,
+		Keys:          keys,
+		Total:         total,
+		Page:          pageNumber,
+		Pages:         pages,
+		Query:         query,
+		PrevURL:       prevURL,
+		NextURL:       nextURL,
+		Now:           s.now(),
+		PublicUploads: s.cfg.PublicUploadsEnabled,
+	}
+	if hasKeyFlash {
+		view.NewKey = flash.Key
+		view.NewKeyName = flash.Name
 	}
 	if raw := r.URL.Query().Get("deleted"); raw != "" {
 		view.Deleted, _ = strconv.Atoi(raw)
@@ -109,10 +123,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		view.Failed, _ = strconv.Atoi(raw)
 	}
 	switch r.URL.Query().Get("keys") {
+	case "created":
+		page.Flash = "User hash generated."
 	case "revoked":
 		page.Flash = "User hash revoked."
 	case "restored":
 		page.Flash = "User hash restored."
+	case "approved":
+		page.Flash = "User hash approved for uploads."
+	case "unapproved":
+		page.Flash = "User hash approval removed."
+	case "invalid":
+		page.Flash = "That user hash could not be found."
+	case "error":
+		page.Flash = "Could not update the user hash."
 	}
 	if view.Deleted > 0 || view.Failed > 0 {
 		page.Flash = fmt.Sprintf("Deleted %d file(s). %d failed.", view.Deleted, view.Failed)
@@ -194,7 +218,29 @@ func (s *Server) handleAdminDeleteFiles(w http.ResponseWriter, r *http.Request) 
 	s.redirectAdmin(w, r, fmt.Sprintf("deleted=%d&failed=%d", deleted, failed))
 }
 
-func (s *Server) handleAdminRevokeKey(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.adminSession(r)
+	if !ok {
+		s.redirectToLogin(w, r)
+		return
+	}
+	if !s.parseAdminForm(w, r) || !s.adminCSRFValid(r, session) {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid form", "The form expired. Reload the admin page.")
+		return
+	}
+	name := cleanLabel(r.PostFormValue("name"))
+	key, rawHash, err := s.newUserHash(r.Context(), name, true)
+	if err != nil {
+		s.logger.Error("admin create user hash", "admin", session.Username, "error", err)
+		s.redirectAdmin(w, r, "keys=error")
+		return
+	}
+	s.setKeyFlash(w, rawHash, key.Name)
+	s.logger.Info("admin created user hash", "admin", session.Username, "key_id", key.ID, "name", key.Name)
+	s.redirectAdmin(w, r, "keys=created")
+}
+
+func (s *Server) handleAdminUpdateKey(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.adminSession(r)
 	if !ok {
 		s.redirectToLogin(w, r)
@@ -206,25 +252,111 @@ func (s *Server) handleAdminRevokeKey(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSpace(r.PostFormValue("id"))
 	action := r.PostFormValue("action")
-	disabled := action == "revoke"
-	if id == "" || (action != "revoke" && action != "restore") {
+	if id == "" {
 		s.redirectAdmin(w, r, "keys=invalid")
 		return
 	}
-	if err := s.store.SetAPIKeyDisabled(r.Context(), id, disabled); err != nil {
+
+	var err error
+	var flash string
+	switch action {
+	case "approve":
+		err = s.store.SetAPIKeyApproved(r.Context(), id, true)
+		flash = "approved"
+	case "unapprove":
+		err = s.store.SetAPIKeyApproved(r.Context(), id, false)
+		flash = "unapproved"
+	case "revoke":
+		err = s.store.SetAPIKeyDisabled(r.Context(), id, true)
+		flash = "revoked"
+	case "restore":
+		err = s.store.SetAPIKeyDisabled(r.Context(), id, false)
+		flash = "restored"
+	default:
+		s.redirectAdmin(w, r, "keys=invalid")
+		return
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			s.redirectAdmin(w, r, "keys=invalid")
 			return
 		}
-		s.logger.Error("revoke api key", "key_id", id, "error", err)
+		s.logger.Error("update api key", "key_id", id, "action", action, "error", err)
 		s.redirectAdmin(w, r, "keys=error")
 		return
 	}
-	if disabled {
-		s.redirectAdmin(w, r, "keys=revoked")
-	} else {
-		s.redirectAdmin(w, r, "keys=restored")
+	s.logger.Info("admin updated user hash", "admin", session.Username, "key_id", id, "action", action)
+	s.redirectAdmin(w, r, "keys="+flash)
+}
+
+type adminKeyFlash struct {
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	Expires int64  `json:"expires"`
+}
+
+func (s *Server) setKeyFlash(w http.ResponseWriter, key, name string) {
+	payload, err := json.Marshal(adminKeyFlash{
+		Key:     key,
+		Name:    name,
+		Expires: s.now().UTC().Add(keyFlashTTL).Unix(),
+	})
+	if err != nil {
+		s.logger.Error("encode key flash", "error", err)
+		return
 	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	http.SetCookie(w, &http.Cookie{
+		Name:     keyFlashCookie,
+		Value:    encoded + "." + s.csrfSignature("keyflash:"+encoded),
+		Path:     "/admin",
+		HttpOnly: true,
+		Secure:   s.cfg.CookieSecure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(keyFlashTTL.Seconds()),
+		Expires:  s.now().Add(keyFlashTTL),
+	})
+}
+
+func (s *Server) takeKeyFlash(w http.ResponseWriter, r *http.Request) (adminKeyFlash, bool) {
+	cookie, err := r.Cookie(keyFlashCookie)
+	if err != nil || cookie.Value == "" {
+		return adminKeyFlash{}, false
+	}
+	s.clearKeyFlash(w)
+
+	parts := strings.SplitN(cookie.Value, ".", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return adminKeyFlash{}, false
+	}
+	if !hmac.Equal([]byte(s.csrfSignature("keyflash:"+parts[0])), []byte(parts[1])) {
+		return adminKeyFlash{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return adminKeyFlash{}, false
+	}
+	var flash adminKeyFlash
+	if err := json.Unmarshal(payload, &flash); err != nil {
+		return adminKeyFlash{}, false
+	}
+	if flash.Key == "" || flash.Expires < s.now().UTC().Unix() {
+		return adminKeyFlash{}, false
+	}
+	return flash, true
+}
+
+func (s *Server) clearKeyFlash(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     keyFlashCookie,
+		Value:    "",
+		Path:     "/admin",
+		HttpOnly: true,
+		Secure:   s.cfg.CookieSecure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
 }
 
 func (s *Server) redirectAdmin(w http.ResponseWriter, r *http.Request, query string) {

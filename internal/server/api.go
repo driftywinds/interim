@@ -42,6 +42,7 @@ type keyDTO struct {
 	UserHash  string    `json:"user_hash"`
 	Prefix    string    `json:"key_prefix"`
 	Name      string    `json:"name,omitempty"`
+	Approved  bool      `json:"approved"`
 	CreatedAt time.Time `json:"created_at"`
 	Warning   string    `json:"warning"`
 }
@@ -50,6 +51,7 @@ type keyInfoDTO struct {
 	ID         string     `json:"id"`
 	KeyPrefix  string     `json:"key_prefix"`
 	Name       string     `json:"name,omitempty"`
+	Approved   bool       `json:"approved"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	Files      int64      `json:"files"`
@@ -68,6 +70,7 @@ type storageDTO struct {
 
 type statusDTO struct {
 	AcceptingUploads bool       `json:"accepting_uploads"`
+	PublicUploads    bool       `json:"public_uploads"`
 	Storage          storageDTO `json:"storage"`
 	RetentionSeconds int64      `json:"retention_seconds"`
 	RetentionHuman   string     `json:"retention_human"`
@@ -169,6 +172,11 @@ func (s *Server) requireAPIKey(w http.ResponseWriter, r *http.Request) (*store.A
 }
 
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.PublicUploadsEnabled {
+		s.writeAPIError(w, r, http.StatusForbidden, "key_creation_disabled", "Public user hash creation is disabled. Ask the admin for an approved user hash.")
+		return
+	}
+
 	ip := s.clientIP(r)
 	if allowed, retry := s.limiter.allow("keycreate:"+ip, 8, time.Hour); !allowed {
 		w.Header().Set("Retry-After", retryString(retry))
@@ -188,39 +196,48 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name := cleanLabel(request.Name)
-	rawHash, err := randomToken(32)
+	key, rawHash, err := s.newUserHash(r.Context(), name, false)
 	if err != nil {
-		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a user hash.")
-		return
-	}
-	rawHash = "interim_" + rawHash
-	id, err := randomToken(12)
-	if err != nil {
-		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a user hash.")
-		return
-	}
-	prefix := rawHash[:min(16, len(rawHash))]
-	created := s.now().UTC()
-	key := store.APIKey{
-		ID:        id,
-		KeyHash:   tokenHash(rawHash),
-		Prefix:    prefix,
-		Name:      name,
-		CreatedAt: created,
-	}
-	if err := s.store.CreateAPIKey(r.Context(), key); err != nil {
 		s.logger.Error("create api key", "error", err)
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a user hash.")
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, keyDTO{
-		ID:        id,
+		ID:        key.ID,
 		UserHash:  rawHash,
-		Prefix:    prefix,
-		Name:      name,
-		CreatedAt: created,
+		Prefix:    key.Prefix,
+		Name:      key.Name,
+		Approved:  key.Approved,
+		CreatedAt: key.CreatedAt,
 		Warning:   "Save this user hash now. It is shown once and cannot be recovered.",
 	})
+}
+
+// newUserHash creates and persists a bearer credential. Admin-created hashes
+// start approved; self-service hashes stay unapproved so enabling the upload
+// allowlist cannot silently authorize credentials created earlier.
+func (s *Server) newUserHash(ctx context.Context, name string, approved bool) (store.APIKey, string, error) {
+	rawHash, err := randomToken(32)
+	if err != nil {
+		return store.APIKey{}, "", err
+	}
+	rawHash = "interim_" + rawHash
+	id, err := randomToken(12)
+	if err != nil {
+		return store.APIKey{}, "", err
+	}
+	key := store.APIKey{
+		ID:        id,
+		KeyHash:   tokenHash(rawHash),
+		Prefix:    rawHash[:min(16, len(rawHash))],
+		Name:      name,
+		Approved:  approved,
+		CreatedAt: s.now().UTC(),
+	}
+	if err := s.store.CreateAPIKey(ctx, key); err != nil {
+		return store.APIKey{}, "", err
+	}
+	return key, rawHash, nil
 }
 
 func (s *Server) handleKeyInfo(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +255,7 @@ func (s *Server) handleKeyInfo(w http.ResponseWriter, r *http.Request) {
 		ID:         key.ID,
 		KeyPrefix:  key.Prefix,
 		Name:       key.Name,
+		Approved:   key.Approved,
 		CreatedAt:  key.CreatedAt,
 		LastUsedAt: key.LastUsedAt,
 		Files:      usage.Files,
@@ -253,6 +271,7 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 		"openapi":           s.cfg.PublicBaseURL + "/api/openapi.json",
 		"retention_seconds": int64(s.cfg.Retention.Seconds()),
 		"retention_human":   retentionLabel(s.cfg.Retention),
+		"public_uploads":    s.cfg.PublicUploadsEnabled,
 		"endpoints": map[string]string{
 			"status":           "/api/v1/status",
 			"create_user_hash": "/api/v1/keys",
@@ -277,6 +296,7 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeJSON(w, http.StatusOK, statusDTO{
 		AcceptingUploads: status.Accepting,
+		PublicUploads:    status.PublicUploads,
 		Storage: storageDTO{
 			Files:          status.Files,
 			UsedBytes:      status.Used,

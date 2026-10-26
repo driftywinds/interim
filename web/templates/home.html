@@ -1,5 +1,5 @@
 {{define "page"}}
-<p class="lede">interim is a fast, minimal temporary file host. Upload anonymously or use the API</p>
+<p class="lede">{{if .Status.PublicUploads}}interim is a fast, minimal temporary file host. Upload anonymously or use the API{{else}}interim is a fast, minimal temporary file host. Uploads are limited to approved user hashes.{{end}}</p>
 
 <div class="expiry-notice" role="note">
     <strong>Every file is permanently deleted after {{.RetentionLabel}}.</strong>
@@ -19,15 +19,35 @@
 <div id="upload-app"
      data-status-url="/api/v1/status"
      data-upload-url="/api/v1/uploads"
+     data-key-info-url="/api/v1/keys/me"
      data-max-file-size="{{.Status.MaxFileSize}}"
-     data-accepting="{{if .Status.Accepting}}true{{else}}false{{end}}">
+     data-accepting="{{if .Status.Accepting}}true{{else}}false{{end}}"
+     data-public-uploads="{{if .Status.PublicUploads}}true{{else}}false{{end}}">
+
+    <section id="upload-gate" class="upload-gate" aria-labelledby="upload-gate-title"{{if .Status.PublicUploads}} hidden{{end}}>
+        <h2 id="upload-gate-title">Restricted uploads</h2>
+        <p>This instance only accepts uploads from approved user hashes. Enter the user hash the admin gave you. It will be saved in this browser.</p>
+        <form id="upload-hash-form" method="post" action="/">
+            <label for="upload-hash">User hash</label>
+            <input type="password" id="upload-hash" name="user_hash" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" required>
+            <button type="submit" id="save-upload-hash">Unlock uploads</button>
+        </form>
+        <p class="muted">The hash is stored only in this browser. Treat it like a password.</p>
+        <p id="upload-hash-error" class="form-error" role="alert" hidden></p>
+    </section>
+
+    <div id="upload-auth-status" class="upload-auth-status" hidden>
+        <span>Uploads unlocked for user hash <code id="upload-auth-prefix"></code></span>
+        <button type="button" class="link-button" id="forget-upload-hash">Forget</button>
+    </div>
+
     <div id="drop-zone" class="upload-zone">
         <input type="file" id="file-input" name="file" multiple>
         <span class="hint">Drop files here · up to {{bytes .Status.MaxFileSize}} per file</span>
     </div>
 
     <div class="upload-actions">
-        <button type="button" id="upload-button"{{if not .Status.Accepting}} disabled{{end}}>Upload</button>
+        <button type="button" id="upload-button"{{if or (not .Status.Accepting) (not .Status.PublicUploads)}} disabled{{end}}>Upload</button>
         <button type="button" id="cancel-button" disabled>Cancel</button>
         <button type="button" id="copy-links" disabled>Copy links</button>
     </div>
@@ -68,6 +88,7 @@
 
 <section class="user-hash" aria-labelledby="hash-title">
     <h2 id="hash-title">User hash</h2>
+    {{if .Status.PublicUploads}}
     <p>A user hash is your API key. It lets you upload, list, and delete files through the API. Keep it secret.</p>
     <div class="inline-actions">
         <button type="button" id="create-user-hash">Create user hash</button>
@@ -75,12 +96,16 @@
     </div>
     <pre id="hash-result" class="hash-result" hidden><code id="hash-value"></code></pre>
     <p id="hash-warning" class="warn-text" hidden>Save this hash now — it is shown once and cannot be recovered.</p>
+    {{else}}
+    <p>Uploads are restricted. User hashes are issued by the admin; public creation is disabled. Ask the admin if you need access.</p>
+    <p><a href="/api">Read the API docs</a></p>
+    {{end}}
 </section>
 
 <section class="features">
     <h2>Our main features include</h2>
     <ul>
-        <li>No account needed</li>
+        <li>{{if .Status.PublicUploads}}No account needed{{else}}Uploads limited to approved user hashes{{end}}</li>
         <li>Expiry period of {{.RetentionLabel}}</li>
         <li>{{if .Status.Unlimited}}No global storage cap{{else}}A strict storage cap (Please donate if you want more storage and retention time){{end}}</li>
         <li>Basic upload history and deletion</li>

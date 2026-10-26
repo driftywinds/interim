@@ -1,6 +1,12 @@
 {{define "page"}}
 <div class="api-docs">
     <p class="lede">Tools to interact with interim programmatically. Uploads go directly from your client to the signed S3 endpoint; interim only signs and records metadata.</p>
+    {{if not .PublicUploads}}
+    <div class="warn" role="note">
+        <p class="lede">Uploads on this instance require an approved user hash.</p>
+        <p>Public user-hash creation is disabled. Ask the admin to generate a hash in <code>/admin</code>; generated hashes are approved automatically. Anonymous uploads return <code>401 uploads_restricted</code>; unapproved hashes return <code>403 upload_not_allowed</code>.</p>
+    </div>
+    {{end}}
     <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.</p>
 
     <nav class="docs-toc" aria-label="API sections">
@@ -26,9 +32,14 @@
     <p>A pending upload can be canceled with <code>DELETE /uploads/{id}</code>. Unclaimed intents and their temporary objects are removed by a janitor after the upload window expires.</p>
 
     <h2 id="authentication">Authentication</h2>
+    {{if .PublicUploads}}
     <p>Create a user hash with <code>POST /keys</code>. It is returned once and can be sent as a bearer credential:</p>
+    {{else}}
+    <p>User hashes are issued by the admin, who also marks them approved for uploads. Public creation through <code>POST /keys</code> is disabled. Send your hash as a bearer credential:</p>
+    {{end}}
     <pre><code>Authorization: Bearer interim_...</code></pre>
     <p><code>X-API-Key: interim_...</code> is also accepted. Creating an upload intent is the only upload step that uses this credential; completion and abort use the separate one-time <code>upload_token</code> returned by the intent.</p>
+    <p><code>GET /keys/me</code> reports an <code>approved</code> flag. With public uploads disabled, only approved hashes may create upload intents.</p>
     <p><strong>Lost user hashes cannot be recovered.</strong> Only a SHA-256 hash is stored on the server.</p>
 
     <h2 id="direct-upload">Direct upload contract</h2>
@@ -53,10 +64,14 @@
     <p><strong>Save <code>delete_token</code>.</strong> Anonymous uploads can only be deleted with it. The complete response returns the file record and page URL, not the delete token again.</p>
 
     <h2 id="quickstart">Quickstart</h2>
-    <h3>1. Create a user hash</h3>
+    <h3>1. Get a user hash</h3>
+    {{if .PublicUploads}}
     <pre><code>curl -X POST {{.BaseURL}}/api/v1/keys \
   -H 'Content-Type: application/json' \
   -d '{"name":"my-cli"}'</code></pre>
+    {{else}}
+    <p>Ask the admin to generate a user hash for you in <code>/admin</code>. Public hash creation is disabled on this instance.</p>
+    {{end}}
 
     <h3>2. Create an upload intent</h3>
     <pre><code>curl -X POST {{.BaseURL}}/api/v1/uploads \
@@ -91,7 +106,11 @@
     <details open>
         <summary><strong>Create a user hash</strong> <code>POST /keys</code></summary>
         <div class="endpoint">
-            <p>Creates an API credential. No authentication required. Subject to per-IP rate limits.</p>
+            {{if .PublicUploads}}
+            <p>Creates an API credential. No authentication required. Subject to per-IP rate limits. New hashes are not approved for restricted uploads until an admin approves them.</p>
+            {{else}}
+            <p>Disabled on this instance because public uploads are off. Ask the admin to generate a hash in <code>/admin</code>.</p>
+            {{end}}
             <pre><code>POST {{.APIBase}}/keys
 Content-Type: application/json
 
@@ -110,7 +129,7 @@ Content-Type: application/json
     <details open>
         <summary><strong>Get current user hash</strong> <code>GET /keys/me</code></summary>
         <div class="endpoint">
-            <p>Requires a bearer user hash. Returns the key prefix and usage counts.</p>
+            <p>Requires a bearer user hash. Returns the key prefix, approval flag, and usage counts.</p>
             <pre><code>GET {{.APIBase}}/keys/me
 Authorization: Bearer interim_...</code></pre>
         </div>
@@ -119,13 +138,17 @@ Authorization: Bearer interim_...</code></pre>
     <details open>
         <summary><strong>Create an upload intent</strong> <code>POST /uploads</code></summary>
         <div class="endpoint">
+            {{if .PublicUploads}}
             <p>Authentication optional. Reserves the declared size immediately and returns a presigned PUT URL. <code>size</code> is required and is the maximum the object may become; the server verifies after the PUT.</p>
+            {{else}}
+            <p>Requires an approved bearer user hash. Reserves the declared size immediately and returns a presigned PUT URL. <code>size</code> is required and is the maximum the object may become; the server verifies after the PUT.</p>
+            {{end}}
             <pre><code>POST {{.APIBase}}/uploads
-Authorization: Bearer interim_...      # optional
+Authorization: Bearer interim_...      # {{if .PublicUploads}}optional{{else}}required and approved{{end}}
 Content-Type: application/json
 
 {"name":"sample.bin","size":12345,"content_type":"application/octet-stream"}</code></pre>
-            <p>Errors: <code>413 file_too_large</code>, <code>429 rate_limited</code>, <code>507 storage_full</code>. The signed PUT URL expires after {{.UploadURLTTL}}; the intent outlives it briefly so completion can still run.</p>
+            <p>Errors: <code>401 uploads_restricted</code>, <code>403 upload_not_allowed</code>, <code>413 file_too_large</code>, <code>429 rate_limited</code>, <code>507 storage_full</code>. The signed PUT URL expires after {{.UploadURLTTL}}; the intent outlives it briefly so completion can still run.</p>
         </div>
     </details>
 
@@ -195,7 +218,7 @@ X-Delete-Token: token_from_intent</code></pre>
     <details open>
         <summary><strong>Storage status</strong> <code>GET /status</code></summary>
         <div class="endpoint">
-            <p>Public. Reports whether uploads are currently accepted, used/reserved bytes, the configured cap (or unlimited), retention, and per-file limit.</p>
+            <p>Public. Reports whether the instance is accepting uploads, whether public uploads are enabled, used/reserved bytes, the configured cap (or unlimited), retention, and per-file limit.</p>
             <pre><code>GET {{.APIBase}}/status</code></pre>
         </div>
     </details>
@@ -205,8 +228,8 @@ X-Delete-Token: token_from_intent</code></pre>
         <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
         <tbody>
         <tr><td>400</td><td><code>invalid_request</code></td><td>Malformed JSON or upload intent.</td></tr>
-        <tr><td>401</td><td><code>unauthorized</code></td><td>Missing or invalid user hash / upload token.</td></tr>
-        <tr><td>403</td><td><code>forbidden</code></td><td>Invalid per-file delete or upload token.</td></tr>
+        <tr><td>401</td><td><code>unauthorized</code> / <code>uploads_restricted</code></td><td>Missing or invalid user hash / upload token, or an anonymous upload while public uploads are off.</td></tr>
+        <tr><td>403</td><td><code>forbidden</code> / <code>upload_not_allowed</code> / <code>key_creation_disabled</code></td><td>Invalid delete or upload token, an unapproved hash, or public hash creation while uploads are restricted.</td></tr>
         <tr><td>404</td><td><code>not_found</code></td><td>Unknown file, upload, or endpoint.</td></tr>
         <tr><td>409</td><td><code>upload_missing</code></td><td>PUT has not reached storage yet; retry completion.</td></tr>
         <tr><td>410</td><td><code>expired</code> / <code>upload_expired</code></td><td>The file retention period or upload window has ended.</td></tr>

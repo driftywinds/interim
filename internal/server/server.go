@@ -32,8 +32,9 @@ import (
 )
 
 const (
-	adminCookie   = "interim_admin"
-	preauthCookie = "interim_csrf"
+	adminCookie    = "interim_admin"
+	preauthCookie  = "interim_csrf"
+	keyFlashCookie = "interim_key_flash"
 )
 
 var (
@@ -134,7 +135,8 @@ func (s *Server) Handler() http.Handler {
 		http.Redirect(w, r, "/admin", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("POST /admin/files/delete", s.handleAdminDeleteFiles)
-	mux.HandleFunc("POST /admin/keys/revoke", s.handleAdminRevokeKey)
+	mux.HandleFunc("POST /admin/keys/create", s.handleAdminCreateKey)
+	mux.HandleFunc("POST /admin/keys/update", s.handleAdminUpdateKey)
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /robots.txt", s.handleRobots)
@@ -195,15 +197,16 @@ func (s *Server) status(ctx context.Context) (StatusView, error) {
 		}
 	}
 	return StatusView{
-		Files:       usage.Files,
-		Used:        usage.Used,
-		Reserved:    usage.Reserved,
-		Limit:       s.cfg.MaxStorage,
-		Available:   available,
-		UsedPercent: percent,
-		Accepting:   unlimited || available > 0,
-		Unlimited:   unlimited,
-		MaxFileSize: s.cfg.MaxFileSize,
+		Files:         usage.Files,
+		Used:          usage.Used,
+		Reserved:      usage.Reserved,
+		Limit:         s.cfg.MaxStorage,
+		Available:     available,
+		UsedPercent:   percent,
+		Accepting:     unlimited || available > 0,
+		PublicUploads: s.cfg.PublicUploadsEnabled,
+		Unlimited:     unlimited,
+		MaxFileSize:   s.cfg.MaxFileSize,
 	}, nil
 }
 

@@ -4,6 +4,7 @@
     const $ = (selector, root) => (root || document).querySelector(selector);
     const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
     const LOCAL_KEY = "interim.uploads.v1";
+    const UPLOAD_HASH_KEY = "interim.uploadHash.v1";
     const MAX_LOCAL = 200;
 
     function toast(message) {
@@ -217,7 +218,9 @@
 
         const statusURL = app.getAttribute("data-status-url");
         const uploadURL = app.getAttribute("data-upload-url");
+        const keyInfoURL = app.getAttribute("data-key-info-url");
         const maxFileSize = Number(app.getAttribute("data-max-file-size")) || 0;
+        const restricted = app.getAttribute("data-public-uploads") === "false";
         const input = $("#file-input");
         const dropZone = $("#drop-zone");
         const uploadButton = $("#upload-button");
@@ -226,8 +229,17 @@
         const errorBox = $("#upload-error");
         const queue = $("#upload-queue");
         const fullWarning = $("#storage-full");
+        const gate = $("#upload-gate");
+        const gateForm = $("#upload-hash-form");
+        const gateInput = $("#upload-hash");
+        const gateError = $("#upload-hash-error");
+        const gateButton = $("#save-upload-hash");
+        const authStatus = $("#upload-auth-status");
+        const authPrefix = $("#upload-auth-prefix");
+        const forgetButton = $("#forget-upload-hash");
 
         let accepting = app.getAttribute("data-accepting") === "true";
+        let uploadKey = null;
         let localUploads = readUploads();
         let tasks = [];
         let active = 0;
@@ -244,11 +256,120 @@
             errorBox.hidden = !message;
         }
 
+        function showGateError(message) {
+            if (!gateError) return;
+            gateError.textContent = message || "";
+            gateError.hidden = !message;
+        }
+
+        function readSavedHash() {
+            try {
+                const raw = window.localStorage.getItem(UPLOAD_HASH_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed.hash !== "string" || !parsed.hash || parsed.hash.length > 256) return null;
+                return parsed;
+            } catch (err) {
+                return null;
+            }
+        }
+
+        function saveHash(hash, prefix) {
+            try {
+                window.localStorage.setItem(UPLOAD_HASH_KEY, JSON.stringify({hash, prefix: prefix || ""}));
+            } catch (err) {
+                toast("Could not save the user hash in this browser.");
+            }
+        }
+
+        function clearSavedHash() {
+            uploadKey = null;
+            try {
+                window.localStorage.removeItem(UPLOAD_HASH_KEY);
+            } catch (err) {
+                // Storage can be unavailable in private modes.
+            }
+        }
+
+        function updateUploadAvailability() {
+            const ready = accepting && (!restricted || Boolean(uploadKey));
+            if (uploadButton) uploadButton.disabled = !ready;
+            if (dropZone) dropZone.classList.toggle("disabled", !ready);
+        }
+
+        function showGate(message) {
+            if (!restricted) return;
+            clearSavedHash();
+            if (gate) gate.hidden = false;
+            if (authStatus) authStatus.hidden = true;
+            showGateError(message || "");
+            updateUploadAvailability();
+        }
+
+        function showUnlocked(prefix) {
+            if (gate) gate.hidden = true;
+            if (authStatus) authStatus.hidden = false;
+            if (authPrefix) {
+                authPrefix.textContent = prefix ? prefix + "…" : "approved user hash";
+            }
+            updateUploadAvailability();
+        }
+
+        async function validateHash(hash) {
+            let response;
+            try {
+                response = await fetch(keyInfoURL, {
+                    headers: {"Authorization": "Bearer " + hash, "Accept": "application/json"},
+                    cache: "no-store"
+                });
+            } catch (err) {
+                throw new Error("Could not reach the server. Check your connection and try again.");
+            }
+            const body = await response.json().catch(() => null);
+            if (!response.ok) {
+                const message = body && body.error && body.error.message
+                    ? body.error.message
+                    : "The user hash is invalid or revoked.";
+                throw new Error(message);
+            }
+            if (!body || !body.approved) {
+                throw new Error("This user hash is valid but is not approved for uploads.");
+            }
+            return body;
+        }
+
+        function unlockWithHash(hash, prefix, persist) {
+            uploadKey = hash;
+            if (persist) saveHash(hash, prefix);
+            showUnlocked(prefix);
+            showGateError("");
+            if (gateInput) gateInput.value = "";
+            startNext();
+        }
+
+        async function initRestrictedUploads() {
+            if (!restricted) return;
+            const saved = readSavedHash();
+            if (!saved) {
+                showGate("");
+                return;
+            }
+            if (gate) gate.hidden = true;
+            if (authStatus) authStatus.hidden = false;
+            if (authPrefix) authPrefix.textContent = (saved.prefix || "saved") + "…";
+            try {
+                const info = await validateHash(saved.hash);
+                unlockWithHash(saved.hash, info.key_prefix || saved.prefix || "", true);
+            } catch (err) {
+                showGate(err.message || "The saved user hash could not be verified.");
+            }
+        }
+
         function setAccepting(next, status) {
             const wasAccepting = accepting;
             accepting = Boolean(next);
             app.setAttribute("data-accepting", accepting ? "true" : "false");
-            if (uploadButton) uploadButton.disabled = !accepting;
+            updateUploadAvailability();
             if (fullWarning) fullWarning.hidden = accepting;
             if (status) {
                 const storage = status.storage || {};
@@ -420,6 +541,10 @@
 
         function enqueue(files) {
             showError("");
+            if (restricted && !uploadKey) {
+                showGate("Enter your approved user hash before uploading.");
+                return;
+            }
             if (!accepting) {
                 showError("Storage maxed out — please try again later.");
                 return;
@@ -444,7 +569,7 @@
         }
 
         function startNext() {
-            if (!accepting) return;
+            if (!accepting || (restricted && !uploadKey)) return;
             while (active < 2) {
                 const task = tasks.find((item) => item.status === "queued");
                 if (!task) break;
@@ -455,6 +580,10 @@
         function startTask(task) {
             if (!accepting) {
                 updateTask(task, "Paused · storage full", 0, true);
+                return;
+            }
+            if (restricted && !uploadKey) {
+                updateTask(task, "Paused · user hash required", 0, true);
                 return;
             }
             task.status = "creating";
@@ -479,9 +608,11 @@
         }
 
         async function createUploadIntent(task) {
+            const headers = {"Content-Type": "application/json", "Accept": "application/json"};
+            if (uploadKey) headers.Authorization = "Bearer " + uploadKey;
             const response = await fetch(uploadURL, {
                 method: "POST",
-                headers: {"Content-Type": "application/json", "Accept": "application/json"},
+                headers,
                 body: JSON.stringify({
                     name: task.file.name,
                     size: task.file.size,
@@ -490,9 +621,13 @@
             });
             const body = await response.json().catch(() => null);
             if (!response.ok || !body || !body.url) {
+                const code = body && body.error && body.error.code ? body.error.code : "";
                 const message = body && body.error && body.error.message
                     ? body.error.message
                     : "Could not create an upload (" + response.status + ").";
+                if (restricted && (code === "uploads_restricted" || code === "unauthorized" || code === "upload_not_allowed")) {
+                    showGate(message);
+                }
                 if (response.status === 507) {
                     setAccepting(false);
                     refreshStatus();
@@ -696,6 +831,40 @@
             });
         }
 
+        if (gateForm) {
+            gateForm.addEventListener("submit", async (event) => {
+                event.preventDefault();
+                if (gateButton && gateButton.disabled) return;
+                const hash = gateInput ? gateInput.value.trim() : "";
+                if (!hash) {
+                    showGateError("Enter the user hash the admin gave you.");
+                    return;
+                }
+                if (!/^interim_[A-Za-z0-9_-]{8,}$/.test(hash)) {
+                    showGateError("That does not look like an interim user hash. It should start with interim_.");
+                    return;
+                }
+                if (gateButton) gateButton.disabled = true;
+                showGateError("");
+                try {
+                    const info = await validateHash(hash);
+                    unlockWithHash(hash, info.key_prefix || "", true);
+                    toast("Uploads unlocked");
+                } catch (err) {
+                    showGateError(err.message || "Could not verify that user hash.");
+                } finally {
+                    if (gateButton) gateButton.disabled = false;
+                }
+            });
+        }
+
+        if (forgetButton) {
+            forgetButton.addEventListener("click", () => {
+                showGate("");
+                toast("User hash forgotten");
+            });
+        }
+
         if (dropZone && input) {
             ["dragenter", "dragover"].forEach((name) => {
                 dropZone.addEventListener(name, (event) => {
@@ -769,6 +938,11 @@
         });
 
         setAccepting(accepting);
+        if (restricted) {
+            initRestrictedUploads();
+        } else {
+            updateUploadAvailability();
+        }
         refreshStatus();
         statusTimer = window.setInterval(refreshStatus, 30000);
         window.addEventListener("pagehide", () => {

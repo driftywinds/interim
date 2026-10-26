@@ -25,15 +25,16 @@ type PageData struct {
 }
 
 type StatusView struct {
-	Files       int64
-	Used        int64
-	Reserved    int64
-	Limit       int64
-	Available   int64
-	UsedPercent float64
-	Accepting   bool
-	Unlimited   bool
-	MaxFileSize int64
+	Files         int64
+	Used          int64
+	Reserved      int64
+	Limit         int64
+	Available     int64
+	UsedPercent   float64
+	Accepting     bool
+	PublicUploads bool
+	Unlimited     bool
+	MaxFileSize   int64
 }
 
 type HomeView struct {
@@ -64,26 +65,30 @@ type APIDocsView struct {
 	MaxFileSize      string
 	MaxStorage       string
 	StorageUnlimited bool
+	PublicUploads    bool
 	DownloadTTL      string
 	UploadURLTTL     string
 }
 
 type AdminView struct {
 	PageData
-	Usage     store.Usage
-	Percent   float64
-	Unlimited bool
-	Files     []store.AdminFile
-	Keys      []store.APIKey
-	Total     int64
-	Page      int
-	Pages     int
-	Query     string
-	PrevURL   string
-	NextURL   string
-	Deleted   int
-	Failed    int
-	Now       time.Time
+	Usage         store.Usage
+	Percent       float64
+	Unlimited     bool
+	Files         []store.AdminFile
+	Keys          []store.APIKey
+	Total         int64
+	Page          int
+	Pages         int
+	Query         string
+	PrevURL       string
+	NextURL       string
+	Deleted       int
+	Failed        int
+	Now           time.Time
+	PublicUploads bool
+	NewKey        string
+	NewKeyName    string
 }
 
 type AuthView struct {

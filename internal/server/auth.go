@@ -354,6 +354,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("delete admin session", "error", err)
 		}
 	}
+	s.clearKeyFlash(w)
 	s.clearAdminCookie(w)
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
