@@ -18,7 +18,8 @@ func scanUploadIntent(scanner rowScanner) (UploadIntent, error) {
 	var completed sql.NullInt64
 	err := scanner.Scan(
 		&intent.ID, &intent.ObjectKey, &apiKeyID, &intent.OriginalName, &intent.ContentType,
-		&intent.DeclaredSize, &intent.UploadTokenHash, &intent.DeleteTokenHash, &intent.State,
+		&intent.DeclaredSize, &intent.UploadTokenHash, &intent.DeleteTokenHash,
+		&intent.MultipartUploadID, &intent.PartSize, &intent.PartCount, &intent.State,
 		&created, &expires, &completed, &fileID,
 	)
 	if err != nil {
@@ -43,10 +44,12 @@ func (s *Store) CreateUploadIntent(ctx context.Context, intent UploadIntent) err
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO upload_intents
 		 (id, object_key, api_key_id, original_name, content_type, declared_size,
-		  upload_token_hash, delete_token_hash, state, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+		  upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
+		  state, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
 		intent.ID, intent.ObjectKey, intent.APIKeyID, intent.OriginalName, intent.ContentType,
 		intent.DeclaredSize, intent.UploadTokenHash, intent.DeleteTokenHash,
+		intent.MultipartUploadID, intent.PartSize, intent.PartCount,
 		toUnix(intent.CreatedAt), toUnix(intent.ExpiresAt),
 	)
 	if err != nil {
@@ -58,7 +61,8 @@ func (s *Store) CreateUploadIntent(ctx context.Context, intent UploadIntent) err
 func (s *Store) UploadIntentByID(ctx context.Context, id string) (UploadIntent, error) {
 	intent, err := scanUploadIntent(s.db.QueryRowContext(ctx,
 		`SELECT id, object_key, api_key_id, original_name, content_type, declared_size,
-		        upload_token_hash, delete_token_hash, state, created_at, expires_at, completed_at, file_id
+		        upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
+		        state, created_at, expires_at, completed_at, file_id
 		 FROM upload_intents WHERE id = ?`,
 		id,
 	))
@@ -77,7 +81,8 @@ func (s *Store) ExpiredPendingUploadIntents(ctx context.Context, now time.Time, 
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, object_key, api_key_id, original_name, content_type, declared_size,
-		        upload_token_hash, delete_token_hash, state, created_at, expires_at, completed_at, file_id
+		        upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
+		        state, created_at, expires_at, completed_at, file_id
 		 FROM upload_intents
 		 WHERE state = 'pending' AND expires_at <= ?
 		 ORDER BY expires_at ASC
@@ -101,6 +106,67 @@ func (s *Store) ExpiredPendingUploadIntents(ctx context.Context, now time.Time, 
 		return nil, fmt.Errorf("iterate upload intents: %w", err)
 	}
 	return intents, nil
+}
+
+func (s *Store) SetUploadMultipartID(ctx context.Context, id, multipartID string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE upload_intents SET multipart_upload_id = ? WHERE id = ? AND state = 'pending'",
+		multipartID, id,
+	)
+	if err != nil {
+		return fmt.Errorf("set multipart upload id: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set multipart upload id rows: %w", err)
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SaveUploadPart(ctx context.Context, uploadID string, partNumber int, etag string, size int64, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO upload_parts (upload_id, part_number, etag, size, created_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(upload_id, part_number) DO UPDATE SET
+		     etag = excluded.etag,
+		     size = excluded.size,
+		     created_at = excluded.created_at`,
+		uploadID, partNumber, etag, size, toUnix(now),
+	)
+	if err != nil {
+		return fmt.Errorf("save upload part: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) UploadParts(ctx context.Context, uploadID string) ([]UploadPart, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT upload_id, part_number, etag, size, created_at
+		 FROM upload_parts WHERE upload_id = ? ORDER BY part_number ASC`,
+		uploadID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list upload parts: %w", err)
+	}
+	defer rows.Close()
+
+	var parts []UploadPart
+	for rows.Next() {
+		var part UploadPart
+		var created int64
+		if err := rows.Scan(&part.UploadID, &part.PartNumber, &part.ETag, &part.Size, &created); err != nil {
+			return nil, fmt.Errorf("scan upload part: %w", err)
+		}
+		part.CreatedAt = scanTime(created)
+		parts = append(parts, part)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate upload parts: %w", err)
+	}
+	return parts, nil
 }
 
 // CommitUploadIntent atomically converts a pending intent into a committed
@@ -154,6 +220,9 @@ func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file Fi
 	if err != nil {
 		return fmt.Errorf("insert uploaded file: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_parts WHERE upload_id = ?", intentID); err != nil {
+		return fmt.Errorf("delete upload parts: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit upload: %w", err)
 	}
@@ -194,6 +263,9 @@ func (s *Store) CloseUploadIntent(ctx context.Context, id, state string, now tim
 	// a no-op for committed intents because their reservation was consumed.
 	if _, err := tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", id); err != nil {
 		return fmt.Errorf("release upload reservation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_parts WHERE upload_id = ?", id); err != nil {
+		return fmt.Errorf("delete upload parts: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit close upload intent: %w", err)

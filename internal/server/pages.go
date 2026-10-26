@@ -107,6 +107,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 		MaxStorage:       units.FormatBytes(s.cfg.MaxStorage),
 		StorageUnlimited: s.cfg.MaxStorage == 0,
 		PublicUploads:    s.cfg.PublicUploadsEnabled,
+		MultipartEnabled: s.cfg.MultipartEnabled,
 		DownloadTTL:      humanDuration(s.cfg.DownloadTTL),
 		UploadURLTTL:     humanDuration(s.cfg.UploadURLTTL),
 	}

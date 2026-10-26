@@ -27,12 +27,16 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
 | `PUBLIC_UPLOADS_ENABLED` | no | `true` | `false` restricts upload intents to admin-approved user hashes and disables public hash creation. Existing hashes start unapproved. |
-| `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT URL lifetime. 5m–2h. |
+| `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT / part URL lifetime. 5m–2h. |
 | `UPLOAD_INTENT_TTL` | no | `45m` | Deadline for completion; must be at least `UPLOAD_URL_TTL`. Max 6h. |
+| `MULTIPART_UPLOAD_ENABLED` | no | `false` | Enable S3 multipart uploads for files above `MULTIPART_THRESHOLD`. |
+| `MULTIPART_THRESHOLD` | no | `64MB` | Size above which multipart is used. `0` makes every upload multipart. Max 5GB. |
+| `MULTIPART_PART_SIZE` | no | `16MB` | Requested part size. 5MB–5GB; raised automatically for the 10,000-part limit. |
+| `MULTIPART_CONCURRENCY` | no | `3` | Browser part parallelism, 1–8. |
 | `MAX_PENDING_UPLOADS_PER_CLIENT` | no | `2` | Per-key or per-IP pending intent cap. `0` disables. |
 | `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Per-key or per-IP reserved-byte cap. `0` disables. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
-| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set, or the 5 GB single-PUT limit. |
+| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set. Files above 5GB require multipart uploads. |
 | `MAX_FILES` | no | `100000` | Global committed-file count cap. `0` disables. |
 | `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry. |
 | `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. Also the worker download token lifetime. |

@@ -76,17 +76,28 @@ type ReservationLimits struct {
 }
 
 type UploadIntent struct {
-	ID              string
-	ObjectKey       string
-	APIKeyID        *string
-	OriginalName    string
-	ContentType     string
-	DeclaredSize    int64
-	UploadTokenHash []byte
-	DeleteTokenHash []byte
-	State           string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	CompletedAt     *time.Time
-	FileID          *string
+	ID                string
+	ObjectKey         string
+	APIKeyID          *string
+	OriginalName      string
+	ContentType       string
+	DeclaredSize      int64
+	UploadTokenHash   []byte
+	DeleteTokenHash   []byte
+	MultipartUploadID string
+	PartSize          int64
+	PartCount         int
+	State             string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	CompletedAt       *time.Time
+	FileID            *string
+}
+
+type UploadPart struct {
+	UploadID   string
+	PartNumber int
+	ETag       string
+	Size       int64
+	CreatedAt  time.Time
 }

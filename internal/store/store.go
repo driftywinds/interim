@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -78,6 +78,18 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := ensureColumn(ctx, db, "storage_reservations", "owner",
 		`ALTER TABLE storage_reservations ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "multipart_upload_id",
+		`ALTER TABLE upload_intents ADD COLUMN multipart_upload_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "part_size",
+		`ALTER TABLE upload_intents ADD COLUMN part_size INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "part_count",
+		`ALTER TABLE upload_intents ADD COLUMN part_count INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx,

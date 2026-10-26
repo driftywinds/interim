@@ -5,6 +5,16 @@ with XHR for progress, then calls the completion endpoint. Canceling aborts the
 intent. Upload URLs are short-lived, so a slow upload can fail before completion;
 the UI reports that and tells the user to try again.
 
+When multipart uploads are enabled and a file exceeds the configured threshold,
+the browser uploads parts concurrently, retries failed parts independently, and
+reports each ETag to interim. Failed tasks show a Retry button that queries the
+server for completed parts and continues; it does not recreate the upload.
+Interrupted multipart sessions are stored in `localStorage` under
+`interim.multipart.v1` along with the upload token. Select the same file again
+to resume from the recorded parts; the interrupted-upload list also offers
+Discard, which aborts the server-side multipart upload. The upload token is a
+bearer credential, so treat browser storage like the delete token.
+
 Completed uploads are stored in `localStorage` under `interim.uploads.v1`,
 including the per-file delete token. Only that browser can see the list.
 Clearing site data loses the local delete ability, but the file still expires

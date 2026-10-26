@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"interim/internal/config"
@@ -22,9 +24,15 @@ const uploadTokenHeader = "X-Upload-Token"
 
 type uploadIntentDTO struct {
 	UploadID          string            `json:"upload_id"`
-	URL               string            `json:"url"`
-	Method            string            `json:"method"`
-	Headers           map[string]string `json:"headers"`
+	Mode              string            `json:"mode"`
+	URL               string            `json:"url,omitempty"`
+	Method            string            `json:"method,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	PartSize          int64             `json:"part_size,omitempty"`
+	PartCount         int               `json:"part_count,omitempty"`
+	Concurrency       int               `json:"concurrency,omitempty"`
+	PartsURL          string            `json:"parts_url,omitempty"`
+	StatusURL         string            `json:"status_url,omitempty"`
 	ExpiresAt         time.Time         `json:"expires_at"`
 	IntentExpiresAt   time.Time         `json:"intent_expires_at"`
 	UploadToken       string            `json:"upload_token"`
@@ -38,6 +46,30 @@ type uploadIntentDTO struct {
 type completeUploadDTO struct {
 	UploadID string  `json:"upload_id"`
 	File     fileDTO `json:"file"`
+}
+
+type uploadStatusDTO struct {
+	UploadID       string    `json:"upload_id"`
+	Mode           string    `json:"mode"`
+	State          string    `json:"state"`
+	PartSize       int64     `json:"part_size,omitempty"`
+	PartCount      int       `json:"part_count,omitempty"`
+	Concurrency    int       `json:"concurrency,omitempty"`
+	CompletedParts []int     `json:"completed_parts"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	CompleteURL    string    `json:"complete_url"`
+	AbortURL       string    `json:"abort_url"`
+	PartsURL       string    `json:"parts_url,omitempty"`
+}
+
+type uploadPartURLDTO struct {
+	PartNumber int       `json:"part_number"`
+	URL        string    `json:"url"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+type uploadPartURLsDTO struct {
+	Parts []uploadPartURLDTO `json:"parts"`
 }
 
 func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
@@ -87,11 +119,23 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The file exceeds the %s per-file limit.", units.FormatBytes(s.cfg.MaxFileSize)))
 		return
 	}
-	if request.Size > config.MaxSinglePutSize {
+	multipart := s.cfg.MultipartEnabled && request.Size > s.cfg.MultipartThreshold
+	if !multipart && request.Size > config.MaxSinglePutSize {
 		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "Direct uploads support at most 5 GB per file.")
 		return
 	}
 	contentType := objects.SanitizeContentType(request.ContentType)
+
+	var partSize int64
+	var partCount int
+	if multipart {
+		partSize = s.multipartPartSize(request.Size)
+		partCount = int((request.Size + partSize - 1) / partSize)
+		if partCount < 1 || partCount > config.MaxMultipartParts {
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not choose a multipart part size.")
+			return
+		}
+	}
 
 	now := s.now().UTC()
 	uploadID, err := randomToken(12)
@@ -137,6 +181,8 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		DeclaredSize:    request.Size,
 		UploadTokenHash: tokenHash(uploadToken),
 		DeleteTokenHash: tokenHash(deleteToken),
+		PartSize:        partSize,
+		PartCount:       partCount,
 		State:           "pending",
 		CreatedAt:       now,
 		ExpiresAt:       intentExpires,
@@ -149,26 +195,11 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	disposition := objects.AttachmentDisposition(name)
-	url, expiresAt, err := s.objects.PresignPut(r.Context(), objectKey, contentType, disposition, s.cfg.UploadURLTTL)
-	if err != nil {
-		s.logger.Error("presign upload", "upload_id", uploadID, "error", err)
-		if closeErr := s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now()); closeErr != nil {
-			s.logger.Error("close failed upload intent", "upload_id", uploadID, "error", closeErr)
-		}
-		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create an upload URL.")
-		return
-	}
-
 	response := uploadIntentDTO{
-		UploadID: uploadID,
-		URL:      url,
-		Method:   http.MethodPut,
-		Headers: map[string]string{
-			"Content-Type":        contentType,
-			"Content-Disposition": disposition,
-		},
-		ExpiresAt:         expiresAt,
+		UploadID:          uploadID,
+		Mode:              "single",
 		IntentExpiresAt:   intentExpires,
+		ExpiresAt:         intentExpires,
 		UploadToken:       uploadToken,
 		CompleteURL:       s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID + "/complete",
 		AbortURL:          s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID,
@@ -176,8 +207,75 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		DeleteTokenHeader: "X-Delete-Token",
 		Warning:           "Upload directly to the signed URL, then call complete_url with the upload token. Keep delete_token private.",
 	}
+	if multipart {
+		multipartID, err := s.objects.CreateMultipart(r.Context(), objectKey, contentType, disposition)
+		if err != nil {
+			s.logger.Error("create multipart upload", "upload_id", uploadID, "error", err)
+			_ = s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now())
+			s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a multipart upload.")
+			return
+		}
+		if err := s.store.SetUploadMultipartID(r.Context(), uploadID, multipartID); err != nil {
+			s.abortMultipartObject(objectKey, multipartID)
+			_ = s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now())
+			s.logger.Error("save multipart upload id", "upload_id", uploadID, "error", err)
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a multipart upload.")
+			return
+		}
+		response.Mode = "multipart"
+		response.PartSize = partSize
+		response.PartCount = partCount
+		response.Concurrency = s.cfg.MultipartConcurrency
+		response.PartsURL = s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID + "/parts"
+		response.StatusURL = s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID
+		response.Warning = "Request part URLs, PUT each part, report its ETag, then call complete_url with the upload token. Keep delete_token private."
+	} else {
+		url, expiresAt, err := s.objects.PresignPut(r.Context(), objectKey, contentType, disposition, s.cfg.UploadURLTTL)
+		if err != nil {
+			s.logger.Error("presign upload", "upload_id", uploadID, "error", err)
+			if closeErr := s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now()); closeErr != nil {
+				s.logger.Error("close failed upload intent", "upload_id", uploadID, "error", closeErr)
+			}
+			s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create an upload URL.")
+			return
+		}
+		response.URL = url
+		response.Method = http.MethodPut
+		response.Headers = map[string]string{
+			"Content-Type":        contentType,
+			"Content-Disposition": disposition,
+		}
+		response.ExpiresAt = expiresAt
+	}
 	w.Header().Set("Location", response.CompleteURL)
 	s.writeJSON(w, http.StatusCreated, response)
+}
+
+func validMultipartParts(intent store.UploadIntent, parts []store.UploadPart) bool {
+	if len(parts) != intent.PartCount || intent.PartCount < 1 || intent.PartSize <= 0 {
+		return false
+	}
+	for i, part := range parts {
+		if part.PartNumber != i+1 || part.Size <= 0 || part.Size > intent.PartSize || part.ETag == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) multipartPartSize(size int64) int64 {
+	partSize := s.cfg.MultipartPartSize
+	if partSize <= 0 {
+		partSize = config.MinMultipartPartSize
+	}
+	minPartSize := (size + int64(config.MaxMultipartParts) - 1) / int64(config.MaxMultipartParts)
+	if partSize < minPartSize {
+		partSize = minPartSize
+	}
+	if partSize < 1 {
+		partSize = 1
+	}
+	return partSize
 }
 
 func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +307,41 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.expireUploadIntent(r.Context(), intent)
 		s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload window expired. The temporary object has been deleted.")
 		return
+	}
+
+	if intent.MultipartUploadID != "" {
+		parts, err := s.store.UploadParts(r.Context(), intent.ID)
+		if err != nil {
+			s.logger.Error("list upload parts", "upload_id", intent.ID, "error", err)
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not read the uploaded parts.")
+			return
+		}
+		if !validMultipartParts(intent, parts) {
+			s.writeAPIError(w, r, http.StatusConflict, "upload_parts_incomplete", "Upload all parts from 1 through part_count and report each ETag before completing.")
+			return
+		}
+		completedParts := make([]objects.MultipartPart, 0, len(parts))
+		for _, part := range parts {
+			completedParts = append(completedParts, objects.MultipartPart{
+				PartNumber: int32(part.PartNumber),
+				ETag:       part.ETag,
+			})
+		}
+		if _, err := s.objects.Head(r.Context(), intent.ObjectKey); errors.Is(err, objects.ErrNotFound) {
+			if err := s.objects.CompleteMultipart(r.Context(), intent.ObjectKey, intent.MultipartUploadID, completedParts); err != nil {
+				// A retry can race a completion that already succeeded. If the
+				// staging object now exists, continue with the common checks.
+				if _, headErr := s.objects.Head(r.Context(), intent.ObjectKey); headErr != nil {
+					s.logger.Error("complete multipart upload", "upload_id", intent.ID, "error", err)
+					s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not complete the multipart upload. Retry completion.")
+					return
+				}
+			}
+		} else if err != nil {
+			s.logger.Error("head multipart staging object", "upload_id", intent.ID, "error", err)
+			s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not verify the multipart upload.")
+			return
+		}
 	}
 
 	info, err := s.objects.Head(r.Context(), intent.ObjectKey)
@@ -303,6 +436,184 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(file)})
 }
 
+func (s *Server) handleUploadStatus(w http.ResponseWriter, r *http.Request) {
+	intent, ok := s.authenticateUploadIntent(w, r)
+	if !ok {
+		return
+	}
+	if intent.State != "pending" && intent.State != "committed" {
+		s.writeAPIError(w, r, http.StatusGone, "upload_closed", "This upload is no longer available.")
+		return
+	}
+	if intent.State == "pending" && !intent.ExpiresAt.After(s.now().UTC()) {
+		s.expireUploadIntent(r.Context(), intent)
+		s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload window expired.")
+		return
+	}
+	completed := make([]int, 0)
+	if intent.MultipartUploadID != "" {
+		parts, err := s.store.UploadParts(r.Context(), intent.ID)
+		if err != nil {
+			s.logger.Error("list upload parts for status", "upload_id", intent.ID, "error", err)
+			s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not read upload parts.")
+			return
+		}
+		for _, part := range parts {
+			completed = append(completed, part.PartNumber)
+		}
+	}
+	mode := "single"
+	partsURL := ""
+	if intent.MultipartUploadID != "" {
+		mode = "multipart"
+		partsURL = s.cfg.PublicBaseURL + "/api/v1/uploads/" + intent.ID + "/parts"
+	}
+	s.writeJSON(w, http.StatusOK, uploadStatusDTO{
+		UploadID:       intent.ID,
+		Mode:           mode,
+		State:          intent.State,
+		PartSize:       intent.PartSize,
+		PartCount:      intent.PartCount,
+		Concurrency:    s.cfg.MultipartConcurrency,
+		CompletedParts: completed,
+		ExpiresAt:      intent.ExpiresAt,
+		CompleteURL:    s.cfg.PublicBaseURL + "/api/v1/uploads/" + intent.ID + "/complete",
+		AbortURL:       s.cfg.PublicBaseURL + "/api/v1/uploads/" + intent.ID,
+		PartsURL:       partsURL,
+	})
+}
+
+func (s *Server) handleUploadPartURLs(w http.ResponseWriter, r *http.Request) {
+	intent, ok := s.authenticateUploadIntent(w, r)
+	if !ok {
+		return
+	}
+	if intent.State != "pending" {
+		s.writeAPIError(w, r, http.StatusGone, "upload_closed", "This upload is no longer pending.")
+		return
+	}
+	if !intent.ExpiresAt.After(s.now().UTC()) {
+		s.expireUploadIntent(r.Context(), intent)
+		s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload window expired.")
+		return
+	}
+	if intent.MultipartUploadID == "" {
+		s.writeAPIError(w, r, http.StatusBadRequest, "not_multipart", "This upload does not use multipart parts.")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var request struct {
+		PartNumbers []int `json:"part_numbers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with part_numbers is required.")
+		return
+	}
+	if len(request.PartNumbers) == 0 || len(request.PartNumbers) > 100 {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "Request between 1 and 100 part URLs at a time.")
+		return
+	}
+	seen := make(map[int]struct{}, len(request.PartNumbers))
+	response := uploadPartURLsDTO{Parts: make([]uploadPartURLDTO, 0, len(request.PartNumbers))}
+	for _, partNumber := range request.PartNumbers {
+		if partNumber < 1 || partNumber > intent.PartCount {
+			s.writeAPIError(w, r, http.StatusBadRequest, "invalid_part", "Part number is outside this upload.")
+			return
+		}
+		if _, duplicate := seen[partNumber]; duplicate {
+			continue
+		}
+		seen[partNumber] = struct{}{}
+		url, expiresAt, err := s.objects.PresignUploadPart(r.Context(), intent.ObjectKey, intent.MultipartUploadID, partNumber, s.cfg.UploadURLTTL)
+		if err != nil {
+			s.logger.Error("presign upload part", "upload_id", intent.ID, "part", partNumber, "error", err)
+			s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a part URL.")
+			return
+		}
+		response.Parts = append(response.Parts, uploadPartURLDTO{
+			PartNumber: partNumber,
+			URL:        url,
+			ExpiresAt:  expiresAt,
+		})
+	}
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleUploadPartReport(w http.ResponseWriter, r *http.Request) {
+	intent, ok := s.authenticateUploadIntent(w, r)
+	if !ok {
+		return
+	}
+	if intent.State != "pending" {
+		s.writeAPIError(w, r, http.StatusGone, "upload_closed", "This upload is no longer pending.")
+		return
+	}
+	if !intent.ExpiresAt.After(s.now().UTC()) {
+		s.expireUploadIntent(r.Context(), intent)
+		s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload window expired.")
+		return
+	}
+	if intent.MultipartUploadID == "" {
+		s.writeAPIError(w, r, http.StatusBadRequest, "not_multipart", "This upload does not use multipart parts.")
+		return
+	}
+	partNumber, err := strconv.Atoi(r.PathValue("part"))
+	if err != nil || partNumber < 1 || partNumber > intent.PartCount {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_part", "Part number is outside this upload.")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var request struct {
+		ETag string `json:"etag"`
+		Size int64  `json:"size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with etag and size is required.")
+		return
+	}
+	request.ETag = strings.TrimSpace(request.ETag)
+	if !validETag(request.ETag) {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_etag", "The part ETag is invalid.")
+		return
+	}
+	if request.Size <= 0 || request.Size > intent.PartSize {
+		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_part_size", "The part size is invalid.")
+		return
+	}
+	if err := s.store.SaveUploadPart(r.Context(), intent.ID, partNumber, request.ETag, request.Size, s.now()); err != nil {
+		s.logger.Error("save upload part", "upload_id", intent.ID, "part", partNumber, "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not record the uploaded part.")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func validETag(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) abortMultipartObject(key, uploadID string) {
+	if uploadID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.objects.AbortMultipart(ctx, key, uploadID); err != nil {
+		s.logger.Warn("abort multipart upload", "key", key, "upload_id", uploadID, "error", err)
+	}
+}
+
 func (s *Server) newLiveObjectKey() (string, error) {
 	token, err := randomToken(16)
 	if err != nil {
@@ -354,6 +665,7 @@ func (s *Server) handleAbortUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
@@ -392,6 +704,7 @@ func (s *Server) authenticateUploadIntent(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) expireUploadIntent(ctx context.Context, intent store.UploadIntent) {
+	s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
 	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
 		s.logger.Error("delete expired upload object", "upload_id", intent.ID, "error", err)
 	}
@@ -402,6 +715,7 @@ func (s *Server) expireUploadIntent(ctx context.Context, intent store.UploadInte
 
 func (s *Server) failUploadIntent(ctx context.Context, intent store.UploadIntent, reason string) {
 	s.logger.Warn("upload failed verification", "upload_id", intent.ID, "reason", reason)
+	s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
 	if err := s.objects.Delete(ctx, intent.ObjectKey); err != nil {
 		s.logger.Error("delete failed upload object", "upload_id", intent.ID, "error", err)
 	}

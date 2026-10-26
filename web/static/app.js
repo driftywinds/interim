@@ -5,7 +5,10 @@
     const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
     const LOCAL_KEY = "interim.uploads.v1";
     const UPLOAD_HASH_KEY = "interim.uploadHash.v1";
+    const MULTIPART_KEY = "interim.multipart.v1";
     const MAX_LOCAL = 200;
+    const MAX_MULTIPART_SESSIONS = 20;
+    const PART_ATTEMPTS = 3;
 
     function toast(message) {
         const el = $("#toast");
@@ -212,6 +215,67 @@
         }
     }
 
+    function readMultipartSessions() {
+        try {
+            const raw = window.localStorage.getItem(MULTIPART_KEY);
+            const parsed = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(parsed)) return [];
+            const now = Date.now();
+            return parsed.filter((item) => {
+                if (!item || typeof item !== "object" || !item.id || !item.uploadToken) return false;
+                const expires = Date.parse(item.expiresAt || "");
+                return Number.isNaN(expires) || expires > now;
+            });
+        } catch (err) {
+            return [];
+        }
+    }
+
+    function writeMultipartSessions(items) {
+        try {
+            window.localStorage.setItem(MULTIPART_KEY, JSON.stringify(items.slice(0, MAX_MULTIPART_SESSIONS)));
+        } catch (err) {
+            // In-memory resume still works for this page session.
+        }
+    }
+
+    function saveMultipartSession(file, intent) {
+        const session = {
+            id: intent.upload_id,
+            uploadToken: intent.upload_token,
+            deleteToken: intent.delete_token,
+            name: file.name,
+            size: file.size,
+            lastModified: file.lastModified || 0,
+            type: file.type || "application/octet-stream",
+            partSize: intent.part_size,
+            partCount: intent.part_count,
+            concurrency: intent.concurrency || 3,
+            expiresAt: intent.intent_expires_at,
+            partsURL: intent.parts_url,
+            statusURL: intent.status_url,
+            completeURL: intent.complete_url,
+            abortURL: intent.abort_url
+        };
+        const sessions = readMultipartSessions().filter((item) => item.id !== session.id);
+        sessions.unshift(session);
+        writeMultipartSessions(sessions);
+        return session;
+    }
+
+    function removeMultipartSession(id) {
+        writeMultipartSessions(readMultipartSessions().filter((item) => item.id !== id));
+    }
+
+    function findMultipartSession(file) {
+        const lastModified = file.lastModified || 0;
+        return readMultipartSessions().find((item) =>
+            item.name === file.name &&
+            item.size === file.size &&
+            (item.lastModified === lastModified || !item.lastModified)
+        ) || null;
+    }
+
     function initHome() {
         const app = $("#upload-app");
         if (!app) return;
@@ -237,6 +301,8 @@
         const authStatus = $("#upload-auth-status");
         const authPrefix = $("#upload-auth-prefix");
         const forgetButton = $("#forget-upload-hash");
+        const resumeSection = $("#resume-uploads");
+        const resumeList = $("#resume-list");
 
         let accepting = app.getAttribute("data-accepting") === "true";
         let uploadKey = null;
@@ -412,6 +478,65 @@
             if (copyButton) copyButton.disabled = completed.length === 0;
         }
 
+        function renderResumeSessions() {
+            if (!resumeSection || !resumeList) return;
+            const busy = new Set(tasks
+                .filter((task) => task.multipartSession &&
+                    (task.status === "creating" || task.status === "uploading" ||
+                     task.status === "completing" || task.status === "queued"))
+                .map((task) => task.multipartSession.id));
+            const sessions = readMultipartSessions().filter((session) => !busy.has(session.id));
+            resumeList.textContent = "";
+            sessions.forEach((session) => {
+                const row = document.createElement("li");
+                row.className = "resume-item";
+                const details = document.createElement("span");
+                details.textContent = (session.name || "upload") + " · " +
+                    formatBytes(session.size) + " · expires " + formatDate(session.expiresAt);
+                const hint = document.createElement("span");
+                hint.className = "muted";
+                hint.textContent = "Select the same file above to resume.";
+                const discard = document.createElement("button");
+                discard.type = "button";
+                discard.className = "link-button";
+                discard.textContent = "Discard";
+                discard.addEventListener("click", () => discardResumeSession(session));
+                const actions = document.createElement("div");
+                actions.className = "row-actions";
+                actions.appendChild(discard);
+                row.append(details, hint, actions);
+                resumeList.appendChild(row);
+            });
+            resumeSection.hidden = sessions.length === 0;
+        }
+
+        async function abortMultipartSession(session, keepalive) {
+            if (!session || !session.abortURL || !session.uploadToken) return;
+            try {
+                await fetch(session.abortURL, {
+                    method: "DELETE",
+                    headers: {"X-Upload-Token": session.uploadToken},
+                    keepalive: Boolean(keepalive)
+                });
+            } catch (err) {
+                // The janitor will expire this multipart upload.
+            }
+        }
+
+        async function discardResumeSession(session) {
+            if (!window.confirm("Discard the interrupted upload of \"" + (session.name || "this file") + "\"?")) return;
+            tasks.forEach((task) => {
+                if (task.multipartSession && task.multipartSession.id === session.id) {
+                    task.multipartSession = null;
+                    if (task.el && task.el.retry) task.el.retry.hidden = true;
+                }
+            });
+            removeMultipartSession(session.id);
+            renderResumeSessions();
+            await abortMultipartSession(session, false);
+            toast("Interrupted upload discarded");
+        }
+
         function renderLocal() {
             const body = $("#local-uploads");
             const empty = $("#local-empty");
@@ -505,12 +630,18 @@
             const name = document.createElement("span");
             name.className = "upload-item-name";
             name.textContent = task.file.name;
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "link-button";
+            retry.textContent = "Retry";
+            retry.hidden = true;
+            retry.addEventListener("click", () => retryTask(task));
             const cancel = document.createElement("button");
             cancel.type = "button";
             cancel.className = "link-button";
             cancel.textContent = "Cancel";
             cancel.addEventListener("click", () => abortTask(task));
-            head.append(name, cancel);
+            head.append(name, retry, cancel);
 
             const progress = document.createElement("div");
             progress.className = "progress";
@@ -528,7 +659,7 @@
 
             li.append(head, progress, stats);
             if (queue) queue.appendChild(li);
-            task.el = {li, bar, left, right, cancel};
+            task.el = {li, bar, left, right, cancel, retry};
         }
 
         function updateTask(task, text, percent, danger) {
@@ -559,13 +690,39 @@
                     showError("\"" + file.name + "\" is larger than the " + formatBytes(maxFileSize) + " per-file limit.");
                     continue;
                 }
-                const task = {id: ++taskID, file, status: "queued", xhr: null, el: null};
+                const session = findMultipartSession(file);
+                if (session) {
+                    const existing = tasks.find((item) =>
+                        item.multipartSession && item.multipartSession.id === session.id && item.status !== "canceled"
+                    );
+                    if (existing) {
+                        toast("That interrupted upload is already in the queue. Use Retry if it failed.");
+                        continue;
+                    }
+                    toast("Resuming interrupted upload of \"" + file.name + "\"");
+                }
+                const task = {
+                    id: ++taskID,
+                    file,
+                    status: "queued",
+                    xhr: null,
+                    el: null,
+                    multipartSession: session,
+                    xhrs: new Set(),
+                    partProgress: new Map(),
+                    completedParts: new Set(),
+                    completedBytes: 0,
+                    finished: false
+                };
                 tasks.push(task);
                 addTaskRow(task);
                 added++;
             }
             if (added > 0 && queue) queue.hidden = false;
-            if (added > 0) startNext();
+            if (added > 0) {
+                renderResumeSessions();
+                startNext();
+            }
         }
 
         function startNext() {
@@ -589,8 +746,14 @@
             task.status = "creating";
             active++;
             if (cancelButton) cancelButton.disabled = false;
-            updateTask(task, "Requesting upload URL…", 0, false);
 
+            if (task.multipartSession) {
+                updateTask(task, "Checking interrupted upload…", 0, false);
+                resumeMultipart(task).catch((err) => failUploadTask(task, err, true));
+                return;
+            }
+
+            updateTask(task, "Requesting upload URL…", 0, false);
             createUploadIntent(task).then((intent) => {
                 if (task.status === "canceled") {
                     abortUploadIntent(intent, false);
@@ -598,13 +761,54 @@
                     return;
                 }
                 task.intent = intent;
+                if (intent.mode === "multipart") {
+                    task.multipartSession = saveMultipartSession(task.file, intent);
+                    task.partProgress = new Map();
+                    task.completedParts = new Set();
+                    renderResumeSessions();
+                    startMultipartParts(task, task.multipartSession, new Set())
+                        .catch((err) => failUploadTask(task, err, true));
+                    return;
+                }
                 sendFileDirect(task, intent);
-            }).catch((err) => {
-                task.status = "failed";
-                updateTask(task, err.message || "Could not start upload.", 0, true);
-                showError(err.message || "Could not start upload.");
+            }).catch((err) => failUploadTask(task, err, false));
+        }
+
+        function failUploadTask(task, err, retryable) {
+            if (task.status === "canceled") {
                 finishTask(task);
-            });
+                return;
+            }
+            const percent = task.status === "completing" ? 100 : 0;
+            task.status = "failed";
+            const message = err && err.message ? err.message : "Could not start upload.";
+            updateTask(task, message, percent, true);
+            showError(message);
+            if (err && err.fatal && task.multipartSession) {
+                abortMultipartSession(task.multipartSession, false);
+                removeMultipartSession(task.multipartSession.id);
+                task.multipartSession = null;
+                renderResumeSessions();
+                retryable = false;
+            }
+            if (retryable && task.multipartSession && task.el && task.el.retry) {
+                task.el.retry.hidden = false;
+            }
+            renderResumeSessions();
+            finishTask(task);
+        }
+
+        function retryTask(task) {
+            if (!task.multipartSession || task.status !== "failed") return;
+            task.finished = false;
+            task.status = "queued";
+            if (task.el) {
+                task.el.retry.hidden = true;
+                task.el.cancel.hidden = false;
+            }
+            updateTask(task, "Queued · resuming " + formatBytes(task.file.size), 0, false);
+            renderResumeSessions();
+            startNext();
         }
 
         async function createUploadIntent(task) {
@@ -620,7 +824,8 @@
                 })
             });
             const body = await response.json().catch(() => null);
-            if (!response.ok || !body || !body.url) {
+            if (!response.ok || !body || (body.mode !== "multipart" && !body.url) ||
+                (body.mode === "multipart" && (!body.parts_url || !body.status_url || !body.part_size || !body.part_count))) {
                 const code = body && body.error && body.error.code ? body.error.code : "";
                 const message = body && body.error && body.error.message
                     ? body.error.message
@@ -671,37 +876,9 @@
                     task.status = "completing";
                     updateTask(task, "Verifying upload…", 100, false);
                     completeUploadIntent(intent).then((file) => {
-                        task.status = "done";
-                        completed.push(file);
-                        localUploads.unshift({
-                            id: file.id,
-                            name: file.name,
-                            size: file.size,
-                            createdAt: file.created_at,
-                            expiresAt: file.expires_at,
-                            pageURL: file.page_url,
-                            deleteToken: intent.delete_token
-                        });
-                        localUploads = localUploads.slice(0, MAX_LOCAL);
-                        writeUploads(localUploads);
-                        renderLocal();
-                        updateTask(task, "Done · " + formatBytes(file.size), 100, false);
-                        if (task.el) {
-                            task.el.cancel.hidden = true;
-                            const open = document.createElement("a");
-                            open.href = file.page_url;
-                            open.textContent = "Open file";
-                            task.el.li.appendChild(open);
-                        }
-                        updateCopyButton();
-                        refreshStatus();
-                        finishTask(task);
+                        handleUploadSuccess(task, intent, file);
                     }).catch((err) => {
-                        task.status = "failed";
-                        const message = err.message || "Upload finished, but verification failed.";
-                        updateTask(task, message, 100, true);
-                        showError(message);
-                        finishTask(task);
+                        failUploadTask(task, err, false);
                     });
                     return;
                 }
@@ -732,6 +909,286 @@
             xhr.send(task.file);
         }
 
+        function partByteLength(session, file, partNumber) {
+            const start = (partNumber - 1) * session.partSize;
+            return Math.max(0, Math.min(session.partSize, file.size - start));
+        }
+
+        function updateMultipartProgress(task) {
+            const session = task.multipartSession;
+            if (!session || !session.partSize) return;
+            let loaded = task.completedBytes || 0;
+            task.partProgress.forEach((bytes, partNumber) => {
+                loaded += Math.min(bytes, partByteLength(session, task.file, partNumber));
+            });
+            loaded = Math.min(loaded, task.file.size);
+            const percent = task.file.size > 0 ? (loaded / task.file.size) * 100 : 0;
+            updateTask(
+                task,
+                "Uploading parts · " + task.completedParts.size + "/" + session.partCount +
+                    " · " + formatBytes(loaded) + " / " + formatBytes(task.file.size),
+                percent,
+                false
+            );
+        }
+
+        async function startMultipartParts(task, session, completedParts) {
+            task.multipartSession = session;
+            task.completedParts = new Set(completedParts || []);
+            task.partProgress = new Map();
+            task.partFailure = null;
+            task.completedBytes = 0;
+            for (const partNumber of task.completedParts) {
+                task.completedBytes += partByteLength(session, task.file, partNumber);
+            }
+            task.status = "uploading";
+            updateMultipartProgress(task);
+
+            const missing = [];
+            for (let n = 1; n <= session.partCount; n++) {
+                if (!task.completedParts.has(n)) missing.push(n);
+            }
+            if (missing.length === 0) {
+                await finishMultipart(task, session);
+                return;
+            }
+
+            let next = 0;
+            const concurrency = Math.max(1, Math.min(Number(session.concurrency) || 3, missing.length));
+            const worker = async () => {
+                while (true) {
+                    if (task.status === "canceled" || task.partFailure) return;
+                    const index = next++;
+                    if (index >= missing.length) return;
+                    try {
+                        await uploadOnePart(task, session, missing[index]);
+                    } catch (err) {
+                        if (task.status !== "canceled" && !task.partFailure) {
+                            task.partFailure = err;
+                        }
+                        return;
+                    }
+                }
+            };
+            await Promise.all(Array.from({length: concurrency}, worker));
+            if (task.status === "canceled") return;
+            if (task.partFailure) throw task.partFailure;
+            await finishMultipart(task, session);
+        }
+
+        async function uploadOnePart(task, session, partNumber) {
+            const length = partByteLength(session, task.file, partNumber);
+            const start = (partNumber - 1) * session.partSize;
+            const blob = task.file.slice(start, start + length);
+            let lastError = null;
+            for (let attempt = 0; attempt < PART_ATTEMPTS; attempt++) {
+                if (task.status === "canceled") throw new Error("Canceled");
+                task.partProgress.set(partNumber, 0);
+                updateMultipartProgress(task);
+                try {
+                    const part = await requestPartURL(task, session, partNumber);
+                    if (task.status === "canceled") throw new Error("Canceled");
+                    const etag = await putPartBlob(task, part.url, blob, partNumber, length);
+                    await reportPart(task, session, partNumber, etag, length);
+                    task.completedParts.add(partNumber);
+                    task.completedBytes += length;
+                    task.partProgress.delete(partNumber);
+                    updateMultipartProgress(task);
+                    return;
+                } catch (err) {
+                    if (task.status === "canceled") throw err;
+                    lastError = err;
+                    if (err && err.fatal) break;
+                    await sleep(500 + attempt * 750);
+                }
+            }
+            throw lastError || new Error("Part upload failed.");
+        }
+
+        async function requestPartURL(task, session, partNumber) {
+            const response = await fetch(session.partsURL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-Upload-Token": session.uploadToken
+                },
+                body: JSON.stringify({part_numbers: [partNumber]}),
+                cache: "no-store"
+            });
+            const body = await response.json().catch(() => null);
+            if (!response.ok || !body || !Array.isArray(body.parts) || !body.parts[0] || !body.parts[0].url) {
+                const message = body && body.error && body.error.message
+                    ? body.error.message
+                    : "Could not get a URL for part " + partNumber + ".";
+                const err = new Error(message);
+                err.fatal = [400, 401, 403, 404, 410].includes(response.status);
+                throw err;
+            }
+            return body.parts[0];
+        }
+
+        function putPartBlob(task, url, blob, partNumber, length) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                task.xhrs.add(xhr);
+                xhr.open("PUT", url, true);
+                xhr.upload.addEventListener("progress", (event) => {
+                    if (!event.lengthComputable) return;
+                    task.partProgress.set(partNumber, Math.min(event.loaded, length));
+                    updateMultipartProgress(task);
+                });
+                xhr.addEventListener("load", () => {
+                    task.xhrs.delete(xhr);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        const etag = xhr.getResponseHeader("ETag");
+                        if (!etag) {
+                            const err = new Error("Storage did not expose the part ETag. Check the bucket CORS ExposeHeaders setting.");
+                            err.fatal = true;
+                            reject(err);
+                            return;
+                        }
+                        resolve(etag);
+                        return;
+                    }
+                    reject(new Error("Part " + partNumber + " upload failed (HTTP " + xhr.status + ")."));
+                });
+                xhr.addEventListener("error", () => {
+                    task.xhrs.delete(xhr);
+                    reject(new Error("Part " + partNumber + " upload failed. Check the bucket CORS policy."));
+                });
+                xhr.addEventListener("abort", () => {
+                    task.xhrs.delete(xhr);
+                    reject(new Error("Canceled"));
+                });
+                xhr.send(blob);
+            });
+        }
+
+        async function reportPart(task, session, partNumber, etag, length) {
+            const response = await fetch(session.partsURL + "/" + partNumber, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Upload-Token": session.uploadToken
+                },
+                body: JSON.stringify({etag: etag, size: length}),
+                cache: "no-store"
+            });
+            if (response.status === 204) return;
+            const body = await response.json().catch(() => null);
+            const message = body && body.error && body.error.message
+                ? body.error.message
+                : "Could not record part " + partNumber + ".";
+            const err = new Error(message);
+            err.fatal = [400, 401, 403, 404, 410].includes(response.status);
+            throw err;
+        }
+
+        async function finishMultipart(task, session) {
+            task.status = "completing";
+            updateTask(task, "Assembling multipart upload…", 100, false);
+            const file = await completeUploadIntent({
+                complete_url: session.completeURL,
+                upload_token: session.uploadToken,
+                delete_token: session.deleteToken,
+                upload_id: session.id,
+                mode: "multipart"
+            });
+            handleUploadSuccess(task, {
+                mode: "multipart",
+                upload_id: session.id,
+                delete_token: session.deleteToken
+            }, file);
+        }
+
+        async function resumeMultipart(task) {
+            const session = task.multipartSession;
+            updateTask(task, "Checking interrupted upload…", 0, false);
+            const response = await fetch(session.statusURL, {
+                headers: {
+                    "X-Upload-Token": session.uploadToken,
+                    "Accept": "application/json"
+                },
+                cache: "no-store"
+            });
+            const body = await response.json().catch(() => null);
+            if (!response.ok || !body) {
+                if ([401, 403, 404, 410].includes(response.status)) {
+                    removeMultipartSession(session.id);
+                    renderResumeSessions();
+                }
+                const message = body && body.error && body.error.message
+                    ? body.error.message
+                    : "Could not resume the interrupted upload.";
+                const err = new Error(message);
+                err.fatal = [401, 403, 404, 410].includes(response.status);
+                throw err;
+            }
+            if (body.state === "committed") {
+                removeMultipartSession(session.id);
+                task.multipartSession = null;
+                renderResumeSessions();
+                task.status = "done";
+                updateTask(task, "Already completed", 100, false);
+                finishTask(task);
+                return;
+            }
+            if (body.mode !== "multipart" || body.state !== "pending") {
+                removeMultipartSession(session.id);
+                task.multipartSession = null;
+                renderResumeSessions();
+                const err = new Error("This interrupted upload is no longer available.");
+                err.fatal = true;
+                throw err;
+            }
+            session.partSize = body.part_size || session.partSize;
+            session.partCount = body.part_count || session.partCount;
+            session.concurrency = body.concurrency || session.concurrency || 3;
+            session.expiresAt = body.expires_at || session.expiresAt;
+            const sessions = readMultipartSessions().filter((item) => item.id !== session.id);
+            sessions.unshift(session);
+            writeMultipartSessions(sessions);
+            await startMultipartParts(task, session, new Set(body.completed_parts || []));
+        }
+
+        function handleUploadSuccess(task, intent, file) {
+            task.status = "done";
+            completed.push(file);
+            localUploads.unshift({
+                id: file.id,
+                name: file.name,
+                size: file.size,
+                createdAt: file.created_at,
+                expiresAt: file.expires_at,
+                pageURL: file.page_url,
+                deleteToken: intent.delete_token
+            });
+            localUploads = localUploads.slice(0, MAX_LOCAL);
+            writeUploads(localUploads);
+            renderLocal();
+            updateTask(task, "Done · " + formatBytes(file.size), 100, false);
+            if (task.el) {
+                task.el.cancel.hidden = true;
+                if (task.el.retry) task.el.retry.hidden = true;
+                const open = document.createElement("a");
+                open.href = file.page_url;
+                open.textContent = "Open file";
+                task.el.li.appendChild(open);
+            }
+            if (task.multipartSession) {
+                removeMultipartSession(task.multipartSession.id);
+                task.multipartSession = null;
+                renderResumeSessions();
+            } else if (intent.mode === "multipart") {
+                removeMultipartSession(intent.upload_id);
+                renderResumeSessions();
+            }
+            updateCopyButton();
+            refreshStatus();
+            finishTask(task);
+        }
+
         async function completeUploadIntent(intent) {
             let lastError = null;
             for (let attempt = 0; attempt < 3; attempt++) {
@@ -747,6 +1204,9 @@
                         ? body.error.message
                         : "Could not finalize the upload (" + response.status + ").";
                     lastError = new Error(message);
+                    if ([400, 401, 403, 404, 410, 413].includes(response.status)) {
+                        lastError.fatal = true;
+                    }
                     if (response.status !== 409 && response.status < 500) break;
                 } catch (err) {
                     lastError = err;
@@ -787,7 +1247,17 @@
             if (task.status === "queued") {
                 task.status = "canceled";
                 updateTask(task, "Canceled", 0, true);
-                if (task.el) task.el.cancel.hidden = true;
+                if (task.el) {
+                    task.el.cancel.hidden = true;
+                    if (task.el.retry) task.el.retry.hidden = true;
+                }
+                if (task.multipartSession) {
+                    const session = task.multipartSession;
+                    removeMultipartSession(session.id);
+                    task.multipartSession = null;
+                    renderResumeSessions();
+                    abortMultipartSession(session, false);
+                }
                 return;
             }
             if (task.status === "completing") {
@@ -795,9 +1265,20 @@
                 return;
             }
             task.status = "canceled";
-            if (task.xhr) {
-                task.xhr.abort();
-            } else if (task.intent) {
+            if (task.xhrs && task.xhrs.size > 0) {
+                Array.from(task.xhrs).forEach((xhr) => xhr.abort());
+            }
+            if (task.xhr) task.xhr.abort();
+            if (task.multipartSession) {
+                const session = task.multipartSession;
+                removeMultipartSession(session.id);
+                task.multipartSession = null;
+                renderResumeSessions();
+                abortMultipartSession(session, false);
+                finishTask(task);
+                return;
+            }
+            if (task.intent) {
                 abortUploadIntent(task.intent, false);
                 finishTask(task);
             }
@@ -931,12 +1412,14 @@
 
         window.addEventListener("pagehide", () => {
             tasks.forEach((task) => {
+                if (task.multipartSession) return;
                 if (task.intent && !task.intent.aborted && (task.status === "uploading" || task.status === "completing")) {
                     abortUploadIntent(task.intent, true);
                 }
             });
         });
 
+        renderResumeSessions();
         setAccepting(accepting);
         if (restricted) {
             initRestrictedUploads();

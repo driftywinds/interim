@@ -55,6 +55,12 @@
     <ul id="upload-queue" class="upload-queue" hidden></ul>
 </div>
 
+<section id="resume-uploads" class="history" hidden>
+    <h2>Interrupted uploads</h2>
+    <p class="muted">Multipart uploads are resumable while the upload intent is still valid. Select the same file above to continue from the completed parts.</p>
+    <ul id="resume-list" class="resume-list"></ul>
+</section>
+
 {{if not .Status.Unlimited}}
 <fieldset class="storage-panel">
     <legend>Storage</legend>

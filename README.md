@@ -14,6 +14,8 @@ Docker as the primary deployment target.
 - Anonymous uploads, or an admin-approved upload allowlist.
 - User hashes (`interim_…`) for API access, upload approval, and revocation.
 - Direct browser-to-S3 uploads through short-lived presigned PUT URLs.
+- Optional S3 multipart uploads with configurable part size and resumable
+  browser sessions for large files.
 - Private bucket downloads with expiring signed or Worker-proxied URLs.
 - Configurable retention, per-file limits, and total storage caps.
 - First-run admin setup, file management, and a background janitor.

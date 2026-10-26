@@ -24,7 +24,15 @@ import (
 	"interim/internal/config"
 )
 
-var ErrNotFound = errors.New("object not found")
+var (
+	ErrNotFound     = errors.New("object not found")
+	ErrNoSuchUpload = errors.New("multipart upload not found")
+)
+
+type MultipartPart struct {
+	PartNumber int32
+	ETag       string
+}
 
 type ObjectInfo struct {
 	Key          string
@@ -37,6 +45,10 @@ type ObjectInfo struct {
 type Store interface {
 	Delete(ctx context.Context, key string) error
 	Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error
+	CreateMultipart(ctx context.Context, key, contentType, contentDisposition string) (string, error)
+	PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, ttl time.Duration) (string, time.Time, error)
+	CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) error
+	AbortMultipart(ctx context.Context, key, uploadID string) error
 	PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error)
 	PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error)
 	Head(ctx context.Context, key string) (ObjectInfo, error)
@@ -189,6 +201,77 @@ func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, content
 	return nil
 }
 
+func (s *S3Store) CreateMultipart(ctx context.Context, key, contentType, contentDisposition string) (string, error) {
+	input := &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}
+	if contentDisposition != "" {
+		input.ContentDisposition = aws.String(contentDisposition)
+	}
+	output, err := s.client.CreateMultipartUpload(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("create multipart upload: %w", err)
+	}
+	if output.UploadId == nil || *output.UploadId == "" {
+		return "", errors.New("create multipart upload returned no upload id")
+	}
+	return *output.UploadId, nil
+}
+
+func (s *S3Store) PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, ttl time.Duration) (string, time.Time, error) {
+	expiresAt := time.Now().UTC().Add(ttl)
+	input := &s3.UploadPartInput{
+		Bucket:     aws.String(s.bucket),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(int32(partNumber)),
+	}
+	presigned, err := s.putPresigner.PresignUploadPart(ctx, input, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("presign upload part: %w", err)
+	}
+	return presigned.URL, expiresAt, nil
+}
+
+func (s *S3Store) CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) error {
+	completed := make([]types.CompletedPart, 0, len(parts))
+	for _, part := range parts {
+		completed = append(completed, types.CompletedPart{
+			ETag:       aws.String(part.ETag),
+			PartNumber: aws.Int32(part.PartNumber),
+		})
+	}
+	_, err := s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completed,
+		},
+	})
+	if err != nil {
+		if isNoSuchUpload(err) {
+			return ErrNoSuchUpload
+		}
+		return fmt.Errorf("complete multipart upload: %w", err)
+	}
+	return nil
+}
+
+func (s *S3Store) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil && !isNoSuchUpload(err) {
+		return fmt.Errorf("abort multipart upload: %w", err)
+	}
+	return nil
+}
+
 func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(ttl)
 	input := &s3.PutObjectInput{
@@ -282,6 +365,17 @@ func (s *S3Store) Health(ctx context.Context) error {
 		return fmt.Errorf("S3 health check: %w", err)
 	}
 	return nil
+}
+
+func isNoSuchUpload(err error) bool {
+	if errors.Is(err, ErrNoSuchUpload) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "NoSuchUpload"
+	}
+	return false
 }
 
 func isNotFound(err error) bool {

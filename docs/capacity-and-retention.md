@@ -37,9 +37,10 @@ before removing the SQLite row.
 
 ## Upload intents and the janitor
 
-Every direct upload creates an `upload_intents` row with state `pending`. The
-browser gets a presigned PUT URL for a staging key and a bearer upload token
-valid until the intent expires; it can be replayed for completion or abort.
+Every upload creates an `upload_intents` row with state `pending`. In single-PUT
+mode the browser gets a presigned PUT URL for a staging key and a bearer upload
+token valid until the intent expires; it can be replayed for completion or
+abort.
 Completion performs `HeadObject` on the staging object, verifies the size, and
 then uses server-side `CopyObject` to a separate live key under
 `<S3_OBJECT_PREFIX>objects/<random>`. Metadata is replaced during the copy, the
@@ -55,6 +56,32 @@ committed, the janitor removes leftovers.
 When `PUBLIC_UPLOADS_ENABLED=false`, creating the intent also requires an
 admin-approved user hash. Completion and abort still use only the upload token,
 so a slow upload is not stranded by a later approval change.
+
+### Multipart uploads
+
+Set `MULTIPART_UPLOAD_ENABLED=true` to switch uploads above
+`MULTIPART_THRESHOLD` (default 64 MiB) to S3 multipart. The default remains
+single-PUT, so existing behavior is unchanged unless this is enabled.
+
+- The server creates `CreateMultipartUpload` on the staging key and returns part
+  metadata; the browser requests short-lived part URLs.
+- Each part is PUT directly to storage, then its ETag and size are reported to
+  interim. ETags are tracked in SQLite so completion and resume do not depend on
+  browser memory.
+- `MULTIPART_PART_SIZE` defaults to 16 MiB and must be at least 5 MiB. It is
+  raised automatically when needed to stay under the 10,000-part limit.
+- `MULTIPART_CONCURRENCY` controls browser part parallelism (default 3).
+- After all parts are reported, `CompleteMultipartUpload` assembles the staging
+  object. The existing live-key copy and size checks then run.
+- A failed part is retried individually. The web UI also keeps resumable session
+  metadata in `localStorage`; re-selecting the same file continues from the
+  parts already recorded. The upload token is stored in that browser record, so
+  treat it like the delete token.
+- Aborting or expiring an intent calls `AbortMultipartUpload` and cleans the
+  database parts. Configure a bucket lifecycle rule for incomplete multipart
+  uploads as a backstop; server state can be lost while provider parts remain.
+- Files above 5 GB require multipart. The provider's own object limit still
+  applies; sss3 defaults `STUPID_MAX_OBJECT_SIZE` to 5 GB.
 
 Abandoned or failed uploads are cleaned by a janitor:
 

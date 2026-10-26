@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: interim API
-  version: 2.1.0
+  version: 2.2.0
   description: |
     interim is a temporary file host. Files expire after the instance's
     configured retention period (7 days by default). Uploads are direct to
@@ -90,14 +90,15 @@ paths:
     post:
       tags: [Uploads]
       operationId: createUploadIntent
-      summary: Reserve quota and sign a PUT URL
+      summary: Reserve quota and create a single-PUT or multipart session
       description: |
         Validates the declared name and size, reserves storage atomically, and
-        returns a short-lived presigned PUT URL. Authentication is optional
-        when public uploads are enabled. When public uploads are disabled, a
-        valid, non-revoked, admin-approved user hash is required. The client
-        must PUT exactly to the returned URL with the returned headers, then
-        call the complete endpoint.
+        returns a short-lived presigned PUT URL (mode=single) or multipart part
+        metadata (mode=multipart). Authentication is optional when public
+        uploads are enabled. When public uploads are disabled, a valid,
+        non-revoked, admin-approved user hash is required. Single PUTs must use
+        exactly the returned URL and headers. Multipart clients request part
+        URLs, PUT each part, report its ETag, then call the complete endpoint.
       security:
         - bearerAuth: []
         - {}
@@ -116,7 +117,8 @@ paths:
                   type: integer
                   format: int64
                   minimum: 1
-                  maximum: 5368709120
+                  maximum: 5497558138880
+                  description: Maximum is the provider object limit; interim's MAX_FILE_SIZE still applies.
                 content_type:
                   type: string
                   maxLength: 255
@@ -157,16 +159,162 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /api/v1/uploads/{id}:
+    get:
+      tags: [Uploads]
+      operationId: getUploadStatus
+      summary: Get multipart upload status
+      description: Requires X-Upload-Token. Returns the upload mode, state, part size/count, and completed part numbers.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+      responses:
+        "200":
+          description: Current upload state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Upload token is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "410":
+          description: Upload expired or is closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [Uploads]
+      operationId: abortUpload
+      summary: Abort a pending upload
+      description: Aborts an in-progress multipart upload, deletes any staging object, releases the quota reservation, and closes the intent. Requires X-Upload-Token.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+      responses:
+        "204":
+          description: Upload closed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Upload token is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Upload was already committed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/uploads/{id}/parts:
+    post:
+      tags: [Uploads]
+      operationId: createUploadPartURLs
+      summary: Request presigned multipart part URLs
+      description: Requires X-Upload-Token. Returns between 1 and 100 short-lived part URLs.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [part_numbers]
+              properties:
+                part_numbers:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: integer
+                    minimum: 1
+                    maximum: 10000
+      responses:
+        "200":
+          description: Presigned part URLs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadPartURLs"
+        "400":
+          description: Invalid part numbers, or the upload is not multipart.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "410":
+          description: Upload expired or is closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/uploads/{id}/parts/{n}:
+    put:
+      tags: [Uploads]
+      operationId: reportUploadPart
+      summary: Record a multipart part ETag
+      description: Requires X-Upload-Token. Records the ETag and size returned by the part PUT.
+      parameters:
+        - $ref: "#/components/parameters/UploadID"
+        - $ref: "#/components/parameters/UploadToken"
+        - $ref: "#/components/parameters/PartNumber"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [etag, size]
+              properties:
+                etag:
+                  type: string
+                  maxLength: 256
+                size:
+                  type: integer
+                  format: int64
+                  minimum: 1
+      responses:
+        "204":
+          description: Part recorded.
+        "400":
+          description: Invalid part number, ETag, size, or upload mode.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "410":
+          description: Upload expired or is closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/uploads/{id}/complete:
     post:
       tags: [Uploads]
       operationId: completeUpload
       summary: Verify and commit an uploaded object
       description: |
-        Requires X-Upload-Token. Performs a HEAD on the object, verifies actual
-        size against the declared size and configured cap, consumes the quota
-        reservation, and inserts the file record. Retrying a committed upload
-        returns the existing file.
+        Requires X-Upload-Token. In multipart mode, assembles the reported parts
+        first. Then performs a HEAD on the staging object, verifies actual size
+        against the declared size and configured cap, copies it to an unexposed
+        live key, consumes the quota reservation, and inserts the file record.
+        Retrying a committed upload returns the existing file.
       parameters:
         - $ref: "#/components/parameters/UploadID"
         - $ref: "#/components/parameters/UploadToken"
@@ -194,7 +342,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: The PUT has not reached S3 yet; retry completion.
+          description: The PUT has not reached S3 yet, or multipart parts are missing.
           content:
             application/json:
               schema:
@@ -207,34 +355,6 @@ paths:
                 $ref: "#/components/schemas/Error"
         "413":
           description: Actual object is larger than declared or allowed.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  /api/v1/uploads/{id}:
-    delete:
-      tags: [Uploads]
-      operationId: abortUpload
-      summary: Abort a pending upload
-      description: Deletes any object at the intent's key, releases its quota reservation, and closes the intent. Requires X-Upload-Token.
-      parameters:
-        - $ref: "#/components/parameters/UploadID"
-        - $ref: "#/components/parameters/UploadToken"
-      responses:
-        "204":
-          description: Upload closed.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: Upload token is invalid.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Upload was already committed.
           content:
             application/json:
               schema:
@@ -370,6 +490,14 @@ components:
       required: true
       schema:
         type: string
+    PartNumber:
+      name: n
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 10000
   responses:
     Unauthorized:
       description: Missing or invalid credential.
@@ -434,14 +562,17 @@ components:
     UploadIntent:
       type: object
       required:
-        [upload_id, url, method, headers, expires_at, intent_expires_at, upload_token, complete_url, abort_url, delete_token, delete_token_header, warning]
+        [upload_id, mode, expires_at, intent_expires_at, upload_token, complete_url, abort_url, delete_token, delete_token_header, warning]
       properties:
         upload_id:
           type: string
+        mode:
+          type: string
+          enum: [single, multipart]
         url:
           type: string
           format: uri
-          description: Presigned S3 PUT URL.
+          description: Presigned S3 PUT URL. Present for single mode.
         method:
           type: string
           const: PUT
@@ -449,7 +580,25 @@ components:
           type: object
           additionalProperties:
             type: string
-          description: Required request headers for the PUT.
+          description: Required request headers for a single PUT.
+        part_size:
+          type: integer
+          format: int64
+          description: Multipart part size in bytes.
+        part_count:
+          type: integer
+          description: Number of parts required for a multipart upload.
+        concurrency:
+          type: integer
+          description: Suggested browser part parallelism.
+        parts_url:
+          type: string
+          format: uri
+          description: Endpoint for requesting presigned part URLs.
+        status_url:
+          type: string
+          format: uri
+          description: Endpoint for multipart status and completed part numbers.
         expires_at:
           type: string
           format: date-time
@@ -475,6 +624,59 @@ components:
           const: X-Delete-Token
         warning:
           type: string
+    UploadStatus:
+      type: object
+      required: [upload_id, mode, state, completed_parts, expires_at, complete_url, abort_url]
+      properties:
+        upload_id:
+          type: string
+        mode:
+          type: string
+          enum: [single, multipart]
+        state:
+          type: string
+          enum: [pending, committed]
+        part_size:
+          type: integer
+          format: int64
+        part_count:
+          type: integer
+        concurrency:
+          type: integer
+        completed_parts:
+          type: array
+          items:
+            type: integer
+        expires_at:
+          type: string
+          format: date-time
+        complete_url:
+          type: string
+          format: uri
+        abort_url:
+          type: string
+          format: uri
+        parts_url:
+          type: string
+          format: uri
+    UploadPartURLs:
+      type: object
+      required: [parts]
+      properties:
+        parts:
+          type: array
+          items:
+            type: object
+            required: [part_number, url, expires_at]
+            properties:
+              part_number:
+                type: integer
+              url:
+                type: string
+                format: uri
+              expires_at:
+                type: string
+                format: date-time
     CompletedUpload:
       type: object
       required: [upload_id, file]

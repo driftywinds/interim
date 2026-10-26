@@ -7,7 +7,7 @@
         <p>Public user-hash creation is disabled. Ask the admin to generate a hash in <code>/admin</code>; generated hashes are approved automatically. Anonymous uploads return <code>401 uploads_restricted</code>; unapproved hashes return <code>403 upload_not_allowed</code>.</p>
     </div>
     {{end}}
-    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.</p>
+    <p class="muted">All files are automatically and permanently deleted after {{.RetentionLabel}}. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} {{if .MultipartEnabled}}This instance uses single PUTs for small files and S3 multipart for files above its configured threshold; the provider's object size limit still applies.{{else}}This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.{{end}}</p>
 
     <nav class="docs-toc" aria-label="API sections">
         <a href="#overview">Overview</a>
@@ -23,12 +23,13 @@
     <h2 id="overview">Overview</h2>
     <p><strong>Base URL:</strong> <code>{{.APIBase}}</code></p>
     <p><strong>Retention:</strong> {{.RetentionLabel}} per file. <strong>Per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed download lifetime:</strong> {{.DownloadTTL}}.</p>
-    <p>Every upload follows the same three steps:</p>
+    <p>A single-PUT upload follows three steps:</p>
     <ol>
         <li><code>POST /uploads</code> creates an upload intent, reserves storage, and returns a short-lived presigned PUT URL.</li>
         <li>Your client <code>PUT</code>s the raw bytes to that URL. No file bytes pass through interim.</li>
         <li><code>POST /uploads/{id}/complete</code> verifies the object in storage and creates the public file record.</li>
     </ol>
+    <p>If the instance has multipart uploads enabled and the file is above the configured threshold, <code>POST /uploads</code> returns <code>mode: "multipart"</code> instead. The client requests part URLs, uploads each part, reports its ETag, then completes. Parts can be retried individually and resumed from <code>GET /uploads/{id}</code>.</p>
     <p>A pending upload can be canceled with <code>DELETE /uploads/{id}</code>. Unclaimed intents and their temporary objects are removed by a janitor after the upload window expires.</p>
 
     <h2 id="authentication">Authentication</h2>
@@ -46,6 +47,7 @@
     <p>The create response contains:</p>
     <pre><code>{
   "upload_id": "…",
+  "mode": "single",
   "url": "https://storage.example/…signature…",
   "method": "PUT",
   "headers": {
@@ -62,6 +64,22 @@
     <p>Send the bytes with exactly the returned method, URL, and headers. Do not send a multipart form to the S3 URL. The S3 bucket must allow CORS for your web origin, including the <code>Content-Type</code> and <code>Content-Disposition</code> request headers.</p>
     <p>After the PUT succeeds, call <code>complete_url</code> with <code>X-Upload-Token: &lt;upload_token&gt;</code>. The server does a <code>HEAD</code> and accepts the object only when its real size is greater than zero and no larger than the declared size and the configured file cap.</p>
     <p><strong>Save <code>delete_token</code>.</strong> Anonymous uploads can only be deleted with it. The complete response returns the file record and page URL, not the delete token again.</p>
+
+    {{if .MultipartEnabled}}
+    <h3 id="multipart-upload">Multipart mode</h3>
+    <p>The create response includes <code>part_size</code>, <code>part_count</code>, <code>parts_url</code>, and <code>status_url</code>. The upload token is required on all part requests.</p>
+    <pre><code>POST /uploads/UPLOAD_ID/parts
+X-Upload-Token: UPLOAD_TOKEN
+{"part_numbers":[1,2,3]}
+
+PUT PART_URL
+&lt;part bytes&gt;
+
+PUT /uploads/UPLOAD_ID/parts/1
+X-Upload-Token: UPLOAD_TOKEN
+{"etag":"\"...\"","size":16777216}</code></pre>
+    <p>All parts 1–<code>part_count</code> must be recorded before completion. <code>GET /uploads/UPLOAD_ID</code> returns <code>completed_parts</code> so a client can resume. The server assembles the parts, verifies the final size, then copies the staging object to the live key.</p>
+    {{end}}
 
     <h2 id="quickstart">Quickstart</h2>
     <h3>1. Get a user hash</h3>
@@ -139,9 +157,9 @@ Authorization: Bearer interim_...</code></pre>
         <summary><strong>Create an upload intent</strong> <code>POST /uploads</code></summary>
         <div class="endpoint">
             {{if .PublicUploads}}
-            <p>Authentication optional. Reserves the declared size immediately and returns a presigned PUT URL. <code>size</code> is required and is the maximum the object may become; the server verifies after the PUT.</p>
+            <p>Authentication optional. Reserves the declared size immediately and returns a presigned PUT URL or multipart state. <code>size</code> is required and is the maximum the object may become; the server verifies after the upload.</p>
             {{else}}
-            <p>Requires an approved bearer user hash. Reserves the declared size immediately and returns a presigned PUT URL. <code>size</code> is required and is the maximum the object may become; the server verifies after the PUT.</p>
+            <p>Requires an approved bearer user hash. Reserves the declared size immediately and returns a presigned PUT URL or multipart state. <code>size</code> is required and is the maximum the object may become; the server verifies after the upload.</p>
             {{end}}
             <pre><code>POST {{.APIBase}}/uploads
 Authorization: Bearer interim_...      # {{if .PublicUploads}}optional{{else}}required and approved{{end}}
@@ -152,22 +170,57 @@ Content-Type: application/json
         </div>
     </details>
 
+    {{if .MultipartEnabled}}
+    <details open>
+        <summary><strong>Get multipart status</strong> <code>GET /uploads/{id}</code></summary>
+        <div class="endpoint">
+            <p>Requires <code>X-Upload-Token</code>. Returns <code>mode</code>, <code>state</code>, part metadata, and <code>completed_parts</code>. Use it to resume after a reload.</p>
+            <pre><code>GET {{.APIBase}}/uploads/UPLOAD_ID
+X-Upload-Token: UPLOAD_TOKEN</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Request part URLs</strong> <code>POST /uploads/{id}/parts</code></summary>
+        <div class="endpoint">
+            <p>Requires <code>X-Upload-Token</code>. Returns 1–100 short-lived part URLs for a multipart intent.</p>
+            <pre><code>POST {{.APIBase}}/uploads/UPLOAD_ID/parts
+X-Upload-Token: UPLOAD_TOKEN
+Content-Type: application/json
+
+{"part_numbers":[1,2,3]}</code></pre>
+        </div>
+    </details>
+
+    <details open>
+        <summary><strong>Report a part</strong> <code>PUT /uploads/{id}/parts/{n}</code></summary>
+        <div class="endpoint">
+            <p>Requires <code>X-Upload-Token</code>. Record the ETag and byte size returned by the part PUT.</p>
+            <pre><code>PUT {{.APIBase}}/uploads/UPLOAD_ID/parts/1
+X-Upload-Token: UPLOAD_TOKEN
+Content-Type: application/json
+
+{"etag":"\"...\"","size":16777216}</code></pre>
+        </div>
+    </details>
+    {{end}}
+
     <details open>
         <summary><strong>Complete an upload</strong> <code>POST /uploads/{id}/complete</code></summary>
         <div class="endpoint">
-            <p>Requires <code>X-Upload-Token</code>. Verifies the object with a HEAD request, checks its actual size, consumes the quota reservation, and commits the file. This endpoint is idempotent: a retry of an already committed upload returns the existing file.</p>
+            <p>Requires <code>X-Upload-Token</code>. {{if .MultipartEnabled}}In multipart mode, assembles the reported parts first. {{end}}Then verifies the object with a HEAD request, checks its actual size, copies it to the live key, consumes the quota reservation, and commits the file. This endpoint is idempotent: a retry of an already committed upload returns the existing file.</p>
             <pre><code>POST {{.APIBase}}/uploads/UPLOAD_ID/complete
 X-Upload-Token: UPLOAD_TOKEN_FROM_INTENT</code></pre>
             <pre><code>HTTP/1.1 201 Created
 {"upload_id":"…","file":{ … }}</code></pre>
-            <p><code>409 upload_missing</code> means the PUT has not reached storage yet; retry. <code>410 upload_expired</code> means the intent window ended and the temporary object was removed.</p>
+            <p><code>409 upload_missing</code> means the PUT has not reached storage yet. <code>409 upload_parts_incomplete</code> means not all multipart parts have been reported. <code>410 upload_expired</code> means the intent window ended and the temporary object was removed.</p>
         </div>
     </details>
 
     <details open>
         <summary><strong>Abort an upload</strong> <code>DELETE /uploads/{id}</code></summary>
         <div class="endpoint">
-            <p>Requires <code>X-Upload-Token</code>. Deletes any object at the intent's key, releases its reservation, and closes the intent. Returns <code>204</code>; committed uploads return <code>409</code>.</p>
+            <p>Requires <code>X-Upload-Token</code>. Aborts an in-progress multipart upload, deletes any staging object, releases the reservation, and closes the intent. Returns <code>204</code>; committed uploads return <code>409</code>.</p>
             <pre><code>DELETE {{.APIBase}}/uploads/UPLOAD_ID
 X-Upload-Token: UPLOAD_TOKEN_FROM_INTENT</code></pre>
         </div>
@@ -227,11 +280,11 @@ X-Delete-Token: token_from_intent</code></pre>
     <table class="fs">
         <thead><tr><th>Status</th><th>Code</th><th>Meaning</th></tr></thead>
         <tbody>
-        <tr><td>400</td><td><code>invalid_request</code></td><td>Malformed JSON or upload intent.</td></tr>
+        <tr><td>400</td><td><code>invalid_request</code> / <code>not_multipart</code> / <code>invalid_part</code> / <code>invalid_etag</code> / <code>invalid_part_size</code></td><td>Malformed JSON, wrong upload mode, part number, ETag, or part size.</td></tr>
         <tr><td>401</td><td><code>unauthorized</code> / <code>uploads_restricted</code></td><td>Missing or invalid user hash / upload token, or an anonymous upload while public uploads are off.</td></tr>
         <tr><td>403</td><td><code>forbidden</code> / <code>upload_not_allowed</code> / <code>key_creation_disabled</code></td><td>Invalid delete or upload token, an unapproved hash, or public hash creation while uploads are restricted.</td></tr>
         <tr><td>404</td><td><code>not_found</code></td><td>Unknown file, upload, or endpoint.</td></tr>
-        <tr><td>409</td><td><code>upload_missing</code></td><td>PUT has not reached storage yet; retry completion.</td></tr>
+        <tr><td>409</td><td><code>upload_missing</code> / <code>upload_parts_incomplete</code></td><td>The PUT has not reached storage yet, or not all multipart parts are recorded.</td></tr>
         <tr><td>410</td><td><code>expired</code> / <code>upload_expired</code></td><td>The file retention period or upload window has ended.</td></tr>
         <tr><td>413</td><td><code>file_too_large</code></td><td>Declared or actual object exceeds the file cap.</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>Too many requests; check <code>Retry-After</code>.</td></tr>

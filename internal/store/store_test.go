@@ -35,6 +35,27 @@ func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
 		);
 		INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
 		VALUES ('legacy-reservation', 1, 1, 2);
+
+		CREATE TABLE upload_intents (
+			id                 TEXT PRIMARY KEY,
+			object_key         TEXT NOT NULL UNIQUE,
+			api_key_id         TEXT,
+			original_name      TEXT NOT NULL,
+			content_type       TEXT NOT NULL,
+			declared_size      INTEGER NOT NULL,
+			upload_token_hash  BLOB NOT NULL,
+			delete_token_hash  BLOB NOT NULL,
+			state              TEXT NOT NULL DEFAULT 'pending',
+			created_at         INTEGER NOT NULL,
+			expires_at         INTEGER NOT NULL,
+			completed_at       INTEGER,
+			file_id            TEXT
+		);
+		INSERT INTO upload_intents
+			(id, object_key, original_name, content_type, declared_size,
+			 upload_token_hash, delete_token_hash, state, created_at, expires_at)
+		VALUES ('legacy-upload', 'files/uploads/legacy', 'old.bin', 'application/octet-stream', 1,
+		        X'00', X'01', 'pending', 1, 9999999999);
 	`)
 	if err != nil {
 		db.Close()
@@ -89,5 +110,23 @@ func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
 	}
 	if owner != "key:test" {
 		t.Fatalf("reservation owner = %q", owner)
+	}
+
+	intent, err := st.UploadIntentByID(context.Background(), "legacy-upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.MultipartUploadID != "" || intent.PartSize != 0 || intent.PartCount != 0 {
+		t.Fatalf("legacy upload multipart fields = %+v", intent)
+	}
+	if err := st.SetUploadMultipartID(context.Background(), intent.ID, "mp-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveUploadPart(context.Background(), intent.ID, 1, `"etag"`, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	parts, err := st.UploadParts(context.Background(), intent.ID)
+	if err != nil || len(parts) != 1 || parts[0].ETag != `"etag"` {
+		t.Fatalf("legacy upload parts = %+v, %v", parts, err)
 	}
 }

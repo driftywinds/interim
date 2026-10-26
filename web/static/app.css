@@ -380,8 +380,29 @@ legend {
 
 .upload-item-head {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: 10px;
+}
+
+.resume-list {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0 0;
+}
+
+.resume-item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.resume-item .muted {
+    flex: 1 1 18rem;
+    font-size: 90%;
 }
 
 .upload-item-name {

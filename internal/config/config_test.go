@@ -69,6 +69,52 @@ func TestLoad(t *testing.T) {
 	if cfg.MaxReservedBytesPerClient != cfg.MaxFileSize {
 		t.Errorf("max reserved bytes = %d", cfg.MaxReservedBytesPerClient)
 	}
+	if cfg.MultipartEnabled {
+		t.Error("multipart uploads should default to disabled")
+	}
+	if cfg.MultipartThreshold != 64<<20 || cfg.MultipartPartSize != 16<<20 || cfg.MultipartConcurrency != 3 {
+		t.Errorf("multipart defaults = %d / %d / %d", cfg.MultipartThreshold, cfg.MultipartPartSize, cfg.MultipartConcurrency)
+	}
+}
+
+func TestMultipartConfig(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("MULTIPART_UPLOAD_ENABLED", "true")
+	t.Setenv("MAX_FILE_SIZE", "6GB")
+	t.Setenv("MULTIPART_THRESHOLD", "128MB")
+	t.Setenv("MULTIPART_PART_SIZE", "8MB")
+	t.Setenv("MULTIPART_CONCURRENCY", "4")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MultipartEnabled || cfg.MaxFileSize != 6<<30 || cfg.MultipartThreshold != 128<<20 || cfg.MultipartPartSize != 8<<20 || cfg.MultipartConcurrency != 4 {
+		t.Fatalf("multipart config = %+v", cfg)
+	}
+}
+
+func TestMultipartConfigRejectsUnsafeValues(t *testing.T) {
+	tests := map[string]string{
+		"MULTIPART_PART_SIZE": "1MB",
+		"MULTIPART_THRESHOLD": "6GB",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			withBaseEnv(t)
+			t.Setenv("MULTIPART_UPLOAD_ENABLED", "true")
+			t.Setenv(name, value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected %s=%s to fail", name, value)
+			}
+		})
+	}
+	t.Run("large file requires multipart", func(t *testing.T) {
+		withBaseEnv(t)
+		t.Setenv("MAX_FILE_SIZE", "6GB")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected >5GB to fail with multipart disabled")
+		}
+	})
 }
 
 func TestSetupTokenCanBeSuppliedByEnv(t *testing.T) {

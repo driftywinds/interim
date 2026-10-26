@@ -45,14 +45,37 @@ Upload intents return a per-file `delete_token` (shown once); use
 files. Raw user hashes, upload tokens, and delete tokens are stored only as
 SHA-256 hashes.
 
+### Multipart mode
+
+If `MULTIPART_UPLOAD_ENABLED=true` and the file exceeds
+`MULTIPART_THRESHOLD`, the create response has `mode: "multipart"` and no
+single `url`. It includes `part_size`, `part_count`, `parts_url`, and
+`status_url`.
+
+1. `POST parts_url` with `X-Upload-Token` and
+   `{"part_numbers":[1,2,3]}`. The response contains short-lived part URLs.
+2. PUT each part body to its URL. Read the response `ETag`.
+3. `PUT parts_url/{n}` with `{"etag":"...","size":123}` and
+   `X-Upload-Token`.
+4. Repeat until `GET status_url` reports all parts in `completed_parts`.
+5. Call `complete_url` with `X-Upload-Token`.
+
+All parts from 1 through `part_count` must be reported before completion; parts
+can be uploaded and reported concurrently. The server still does the final
+`HeadObject` size check and live-key copy. A failed part can be retried
+independently; `GET status_url` lets a client resume after reload.
+
 ## Endpoints
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/keys` | no | Create user hash. Disabled when public uploads are off. |
 | `GET` | `/api/v1/keys/me` | bearer | Key prefix, approval, and usage. |
-| `POST` | `/api/v1/uploads` | optional; approved when restricted | Reserve quota and sign a PUT URL. |
-| `POST` | `/api/v1/uploads/{id}/complete` | upload token | Verify and commit the object. |
+| `POST` | `/api/v1/uploads` | optional; approved when restricted | Reserve quota and create single-PUT or multipart upload state. |
+| `GET` | `/api/v1/uploads/{id}` | upload token | Multipart status and completed part numbers. |
+| `POST` | `/api/v1/uploads/{id}/parts` | upload token | Request up to 100 presigned part URLs. |
+| `PUT` | `/api/v1/uploads/{id}/parts/{n}` | upload token | Record a part ETag and size. |
+| `POST` | `/api/v1/uploads/{id}/complete` | upload token | Assemble/verify and commit the object. |
 | `DELETE` | `/api/v1/uploads/{id}` | upload token | Abort a pending upload and release quota. |
 | `GET` | `/api/v1/files` | bearer | List the caller's active files. |
 | `GET` | `/api/v1/files/{id}` | no | Public metadata. |

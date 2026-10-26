@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,14 +31,30 @@ type fakeObject struct {
 	lastModified time.Time
 }
 
+type fakePart struct {
+	data []byte
+	etag string
+}
+
+type fakeMultipart struct {
+	key         string
+	contentType string
+	parts       map[int]fakePart
+}
+
 type fakeStore struct {
-	mu          sync.Mutex
-	objects     map[string]fakeObject
-	healthCalls int
+	mu            sync.Mutex
+	objects       map[string]fakeObject
+	multipart     map[string]*fakeMultipart
+	nextMultipart int
+	healthCalls   int
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{objects: make(map[string]fakeObject)}
+	return &fakeStore{
+		objects:   make(map[string]fakeObject),
+		multipart: make(map[string]*fakeMultipart),
+	}
 }
 
 func (f *fakeStore) putObject(key string, data []byte, modified time.Time) {
@@ -51,6 +68,77 @@ func (f *fakeStore) Delete(ctx context.Context, key string) error {
 	delete(f.objects, key)
 	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeStore) CreateMultipart(ctx context.Context, key, contentType, contentDisposition string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextMultipart++
+	id := "mp-" + strconv.Itoa(f.nextMultipart)
+	f.multipart[id] = &fakeMultipart{
+		key:         key,
+		contentType: contentType,
+		parts:       make(map[int]fakePart),
+	}
+	return id, nil
+}
+
+func (f *fakeStore) PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, ttl time.Duration) (string, time.Time, error) {
+	return "https://storage.test/part/" + url.PathEscape(key) + "/" + url.QueryEscape(uploadID) + "/" + strconv.Itoa(partNumber), time.Now().Add(ttl), nil
+}
+
+func (f *fakeStore) CompleteMultipart(ctx context.Context, key, uploadID string, parts []objects.MultipartPart) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	upload, ok := f.multipart[uploadID]
+	if !ok || upload.key != key {
+		return objects.ErrNoSuchUpload
+	}
+	var data []byte
+	for _, part := range parts {
+		stored, ok := upload.parts[int(part.PartNumber)]
+		if !ok || stored.etag != part.ETag {
+			return errors.New("fake multipart part missing or etag mismatch")
+		}
+		data = append(data, stored.data...)
+	}
+	f.objects[key] = fakeObject{
+		data:         data,
+		contentType:  upload.contentType,
+		lastModified: time.Now(),
+	}
+	delete(f.multipart, uploadID)
+	return nil
+}
+
+func (f *fakeStore) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.multipart, uploadID)
+	return nil
+}
+
+func (f *fakeStore) multipartIDFor(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, upload := range f.multipart {
+		if upload.key == key {
+			return id
+		}
+	}
+	return ""
+}
+
+func (f *fakeStore) putPart(uploadID string, partNumber int, data []byte) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	upload := f.multipart[uploadID]
+	if upload == nil {
+		return ""
+	}
+	etag := `"etag-` + strconv.Itoa(partNumber) + "-" + strconv.Itoa(len(data)) + `"`
+	upload.parts[partNumber] = fakePart{data: append([]byte(nil), data...), etag: etag}
+	return etag
 }
 
 func (f *fakeStore) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error {
@@ -144,6 +232,9 @@ func newTestEnv(t *testing.T, maxStorage, maxFile int64) *testEnv {
 		MaxFiles:                   100000,
 		MaxPendingUploadsPerClient: 2,
 		MaxReservedBytesPerClient:  maxFile,
+		MultipartThreshold:         64 << 20,
+		MultipartPartSize:          16 << 20,
+		MultipartConcurrency:       3,
 		PublicUploadsEnabled:       true,
 		SessionTTL:                 time.Hour,
 		CookieSecure:               false,
@@ -312,6 +403,69 @@ func (e *testEnv) completeIntent(t *testing.T, uploadID, uploadToken string) (in
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
 	return response.StatusCode, body
+}
+
+func (e *testEnv) multipartPartURLs(t *testing.T, intent uploadIntentDTO, partNumbers []int) []uploadPartURLDTO {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"part_numbers": partNumbers})
+	request, err := http.NewRequest(http.MethodPost, e.http.URL+"/api/v1/uploads/"+intent.UploadID+"/parts", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := e.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("part URLs status = %d: %s", response.StatusCode, data)
+	}
+	var payload uploadPartURLsDTO
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Parts
+}
+
+func (e *testEnv) reportPart(t *testing.T, intent uploadIntentDTO, partNumber int, etag string, size int) int {
+	t.Helper()
+	body := `{"etag":` + strconv.Quote(etag) + `,"size":` + strconv.Itoa(size) + `}`
+	request, err := http.NewRequest(http.MethodPut, e.http.URL+"/api/v1/uploads/"+intent.UploadID+"/parts/"+strconv.Itoa(partNumber), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := e.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	return response.StatusCode
+}
+
+func (e *testEnv) uploadStatus(t *testing.T, intent uploadIntentDTO) (int, uploadStatusDTO) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, e.http.URL+"/api/v1/uploads/"+intent.UploadID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := e.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload uploadStatusDTO
+	if response.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return response.StatusCode, payload
 }
 
 func (e *testEnv) upload(t *testing.T, userHash, name string, data []byte) uploadResult {
@@ -500,6 +654,159 @@ func TestCompletionCopiesToLiveObject(t *testing.T) {
 	}
 	if info.Size != int64(len("hello")) {
 		t.Fatalf("live object size = %d", info.Size)
+	}
+}
+
+func TestMultipartUploadResumeAndComplete(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 20)
+	env.server.cfg.MultipartEnabled = true
+	env.server.cfg.MultipartThreshold = 1
+	env.server.cfg.MultipartPartSize = 3
+	env.server.cfg.MultipartConcurrency = 2
+
+	status, body, intent := env.createIntent(t, "", "multipart.bin", 7, "application/octet-stream")
+	if status != http.StatusCreated {
+		t.Fatalf("create multipart intent = %d: %s", status, body)
+	}
+	if intent.Mode != "multipart" || intent.URL != "" || intent.PartSize != 3 || intent.PartCount != 3 || intent.PartsURL == "" || intent.StatusURL == "" {
+		t.Fatalf("unexpected multipart intent: %+v", intent)
+	}
+	if urls := env.multipartPartURLs(t, intent, []int{1, 2, 3}); len(urls) != 3 {
+		t.Fatalf("part URL count = %d", len(urls))
+	}
+
+	multipartID := env.fake.multipartIDFor(stagingKey(intent.UploadID))
+	if multipartID == "" {
+		t.Fatal("fake multipart upload was not created")
+	}
+	partData := [][]byte{[]byte("abc"), []byte("def"), []byte("g")}
+	for i, data := range partData {
+		partNumber := i + 1
+		etag := env.fake.putPart(multipartID, partNumber, data)
+		if etag == "" {
+			t.Fatal("fake part upload failed")
+		}
+		if code := env.reportPart(t, intent, partNumber, etag, len(data)); code != http.StatusNoContent {
+			t.Fatalf("report part %d status = %d", partNumber, code)
+		}
+	}
+
+	status, state := env.uploadStatus(t, intent)
+	if status != http.StatusOK || state.Mode != "multipart" || len(state.CompletedParts) != 3 {
+		t.Fatalf("upload status = %d %+v", status, state)
+	}
+	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
+	if completeStatus != http.StatusCreated {
+		t.Fatalf("multipart complete = %d: %s", completeStatus, completeBody)
+	}
+	file, err := env.store.FileByID(context.Background(), intent.UploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Size != 7 || !strings.HasPrefix(file.ObjectKey, "files/objects/") {
+		t.Fatalf("committed multipart file = %+v", file)
+	}
+	if env.fake.exists(stagingKey(intent.UploadID)) {
+		t.Fatal("multipart staging object was not removed")
+	}
+	if env.fake.multipartIDFor(stagingKey(intent.UploadID)) != "" {
+		t.Fatal("multipart upload was not finalized")
+	}
+	if parts, err := env.store.UploadParts(context.Background(), intent.UploadID); err != nil || len(parts) != 0 {
+		t.Fatalf("upload parts after commit = %+v, %v", parts, err)
+	}
+}
+
+func TestMultipartCompletionRequiresAllParts(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 20)
+	env.server.cfg.MultipartEnabled = true
+	env.server.cfg.MultipartThreshold = 1
+	env.server.cfg.MultipartPartSize = 3
+
+	status, body, intent := env.createIntent(t, "", "partial.bin", 7, "application/octet-stream")
+	if status != http.StatusCreated {
+		t.Fatalf("create multipart intent = %d: %s", status, body)
+	}
+	multipartID := env.fake.multipartIDFor(stagingKey(intent.UploadID))
+	if multipartID == "" {
+		t.Fatal("fake multipart upload was not created")
+	}
+	etag := env.fake.putPart(multipartID, 1, []byte("abc"))
+	if code := env.reportPart(t, intent, 1, etag, 3); code != http.StatusNoContent {
+		t.Fatalf("report part status = %d", code)
+	}
+	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
+	if completeStatus != http.StatusConflict || !bytes.Contains(completeBody, []byte(`"upload_parts_incomplete"`)) {
+		t.Fatalf("incomplete multipart complete = %d: %s", completeStatus, completeBody)
+	}
+	status, state := env.uploadStatus(t, intent)
+	if status != http.StatusOK || len(state.CompletedParts) != 1 {
+		t.Fatalf("resume status = %d %+v", status, state)
+	}
+}
+
+func TestMultipartAbort(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 20)
+	env.server.cfg.MultipartEnabled = true
+	env.server.cfg.MultipartThreshold = 1
+	env.server.cfg.MultipartPartSize = 3
+
+	status, body, intent := env.createIntent(t, "", "cancel.bin", 7, "application/octet-stream")
+	if status != http.StatusCreated {
+		t.Fatalf("create multipart intent = %d: %s", status, body)
+	}
+	multipartID := env.fake.multipartIDFor(stagingKey(intent.UploadID))
+	if multipartID == "" {
+		t.Fatal("fake multipart upload was not created")
+	}
+	etag := env.fake.putPart(multipartID, 1, []byte("abc"))
+	if code := env.reportPart(t, intent, 1, etag, 3); code != http.StatusNoContent {
+		t.Fatalf("report part status = %d", code)
+	}
+	request, _ := http.NewRequest(http.MethodDelete, env.http.URL+"/api/v1/uploads/"+intent.UploadID, nil)
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := env.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("abort multipart status = %d", response.StatusCode)
+	}
+	if env.fake.multipartIDFor(stagingKey(intent.UploadID)) != "" {
+		t.Fatal("aborted multipart upload still exists")
+	}
+	status, _ = env.uploadStatus(t, intent)
+	if status != http.StatusGone {
+		t.Fatalf("aborted upload status = %d", status)
+	}
+	if parts, err := env.store.UploadParts(context.Background(), intent.UploadID); err != nil || len(parts) != 0 {
+		t.Fatalf("upload parts after abort = %+v, %v", parts, err)
+	}
+}
+
+func TestJanitorAbortsExpiredMultipart(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 20)
+	env.server.cfg.MultipartEnabled = true
+	env.server.cfg.MultipartThreshold = 1
+	env.server.cfg.MultipartPartSize = 3
+	status, body, intent := env.createIntent(t, "", "expired-multipart.bin", 7, "application/octet-stream")
+	if status != http.StatusCreated {
+		t.Fatalf("create multipart intent = %d: %s", status, body)
+	}
+	multipartID := env.fake.multipartIDFor(stagingKey(intent.UploadID))
+	if multipartID == "" {
+		t.Fatal("fake multipart upload was not created")
+	}
+	env.fake.putPart(multipartID, 1, []byte("abc"))
+	env.server.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	env.server.MaintenanceOnce(context.Background())
+	if env.fake.multipartIDFor(stagingKey(intent.UploadID)) != "" {
+		t.Fatal("janitor did not abort expired multipart upload")
+	}
+	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "expired" {
+		t.Fatalf("intent state = %+v, err = %v", stored, err)
 	}
 }
 

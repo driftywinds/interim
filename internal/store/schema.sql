@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS upload_intents (
     declared_size      INTEGER NOT NULL CHECK (declared_size > 0),
     upload_token_hash  BLOB NOT NULL,
     delete_token_hash  BLOB NOT NULL,
+    multipart_upload_id TEXT NOT NULL DEFAULT '',
+    part_size          INTEGER NOT NULL DEFAULT 0,
+    part_count         INTEGER NOT NULL DEFAULT 0,
     state              TEXT NOT NULL DEFAULT 'pending'
                        CHECK (state IN ('pending', 'committed', 'aborted', 'expired', 'failed')),
     created_at         INTEGER NOT NULL,
@@ -73,3 +76,14 @@ CREATE TABLE IF NOT EXISTS upload_intents (
 
 CREATE INDEX IF NOT EXISTS upload_intents_state_expires ON upload_intents(state, expires_at);
 CREATE INDEX IF NOT EXISTS upload_intents_expires_at ON upload_intents(expires_at);
+
+CREATE TABLE IF NOT EXISTS upload_parts (
+    upload_id   TEXT NOT NULL REFERENCES upload_intents(id) ON DELETE CASCADE,
+    part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
+    etag        TEXT NOT NULL,
+    size        INTEGER NOT NULL CHECK (size > 0),
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (upload_id, part_number)
+);
+
+CREATE INDEX IF NOT EXISTS upload_parts_upload_id ON upload_parts(upload_id);

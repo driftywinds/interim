@@ -34,6 +34,11 @@ never receives a URL for the live key, and the public endpoint should reject
 `X-Amz-Copy-Source` and `X-Amz-Copy-Source-Range` so a presigned PUT cannot be
 switched into a server-side copy.
 
+With multipart enabled, browser part URLs use `S3_PUBLIC_ENDPOINT`, while
+`CreateMultipartUpload`, `CompleteMultipartUpload`, and `AbortMultipartUpload`
+use the server-side `S3_ENDPOINT`. On sss3 that endpoint must be internal/direct
+because the public Caddy listener blocks `CopyObject`.
+
 For providers that support write-only credentials, set
 `S3_PUT_ACCESS_KEY` and `S3_PUT_SECRET_KEY`. Those credentials are used only
 for presigning browser PUTs; `S3_ACCESS_KEY` / `S3_SECRET_KEY` retain read,
@@ -60,6 +65,9 @@ method, and the headers included in the create-upload response:
   }
 ]
 ```
+
+Multipart browser uploads require the bucket CORS policy to expose `ETag`;
+otherwise the browser cannot report the part checksum to interim.
 
 API-only clients such as curl do not need CORS, but do need a browser-reachable
 `S3_PUBLIC_ENDPOINT` and a provider that supports presigned PUT requests. If

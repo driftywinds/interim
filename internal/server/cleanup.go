@@ -30,6 +30,7 @@ func (s *Server) cleanupExpiredUploadIntents(ctx context.Context) (int, error) {
 			break
 		}
 		for _, intent := range intents {
+			s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
 			deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err := s.objects.Delete(deleteCtx, intent.ObjectKey)
 			cancel()

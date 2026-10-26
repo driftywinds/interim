@@ -26,9 +26,14 @@ const (
 	// with RETENTION in the environment.
 	DefaultRetention = 7 * 24 * time.Hour
 
-	// MaxSinglePutSize is the S3 single-PUT object limit. interim uses direct
-	// browser PUTs and does not implement multipart uploads.
+	// MaxSinglePutSize is the S3 single-PUT object limit.
 	MaxSinglePutSize int64 = 5 << 30
+
+	// MaxMultipartObjectSize is the S3 maximum object size. The effective
+	// multipart part size is raised as needed to stay under MaxMultipartParts.
+	MaxMultipartObjectSize int64 = 5 << 40
+	MinMultipartPartSize   int64 = 5 << 20
+	MaxMultipartParts            = 10000
 )
 
 type Config struct {
@@ -54,6 +59,10 @@ type Config struct {
 	MaxFiles                   int64
 	MaxPendingUploadsPerClient int
 	MaxReservedBytesPerClient  int64
+	MultipartEnabled           bool
+	MultipartThreshold         int64
+	MultipartPartSize          int64
+	MultipartConcurrency       int
 
 	PublicUploadsEnabled bool
 
@@ -121,9 +130,6 @@ func Load() (Config, error) {
 	if maxStorage > 0 && maxFileSize > maxStorage {
 		return Config{}, errors.New("MAX_FILE_SIZE cannot be larger than MAX_STORAGE")
 	}
-	if maxFileSize > MaxSinglePutSize {
-		return Config{}, fmt.Errorf("MAX_FILE_SIZE cannot exceed %s because direct uploads use a single S3 PUT", units.FormatBytes(MaxSinglePutSize))
-	}
 
 	maxFiles, err := parseInt64Limit("MAX_FILES", 100000, 0, 1_000_000_000)
 	if err != nil {
@@ -139,6 +145,39 @@ func Load() (Config, error) {
 	)
 	if err != nil {
 		return Config{}, err
+	}
+
+	multipartEnabled, err := parseBool("MULTIPART_UPLOAD_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	multipartThreshold, err := parseByteLimitAllowZero("MULTIPART_THRESHOLD", "64MB")
+	if err != nil {
+		return Config{}, err
+	}
+	multipartPartSize, err := units.ParseBytes(envOr("MULTIPART_PART_SIZE", "16MB"))
+	if err != nil {
+		return Config{}, fmt.Errorf("MULTIPART_PART_SIZE: %w", err)
+	}
+	multipartConcurrency, err := parseIntLimit("MULTIPART_CONCURRENCY", 3, 1, 8)
+	if err != nil {
+		return Config{}, err
+	}
+	if multipartThreshold > MaxSinglePutSize {
+		return Config{}, fmt.Errorf("MULTIPART_THRESHOLD cannot exceed %s", units.FormatBytes(MaxSinglePutSize))
+	}
+	if multipartPartSize < MinMultipartPartSize {
+		return Config{}, fmt.Errorf("MULTIPART_PART_SIZE must be at least %s", units.FormatBytes(MinMultipartPartSize))
+	}
+	if multipartPartSize > MaxSinglePutSize {
+		return Config{}, fmt.Errorf("MULTIPART_PART_SIZE cannot exceed %s", units.FormatBytes(MaxSinglePutSize))
+	}
+	if multipartEnabled {
+		if maxFileSize > MaxMultipartObjectSize {
+			return Config{}, fmt.Errorf("MAX_FILE_SIZE cannot exceed %s with multipart uploads", units.FormatBytes(MaxMultipartObjectSize))
+		}
+	} else if maxFileSize > MaxSinglePutSize {
+		return Config{}, fmt.Errorf("MAX_FILE_SIZE cannot exceed %s because single-PUT uploads are enabled", units.FormatBytes(MaxSinglePutSize))
 	}
 
 	retention, err := parseRetention(envOr("RETENTION", "7d"))
@@ -250,6 +289,10 @@ func Load() (Config, error) {
 		MaxFiles:                   maxFiles,
 		MaxPendingUploadsPerClient: maxPending,
 		MaxReservedBytesPerClient:  maxReservedBytes,
+		MultipartEnabled:           multipartEnabled,
+		MultipartThreshold:         multipartThreshold,
+		MultipartPartSize:          multipartPartSize,
+		MultipartConcurrency:       multipartConcurrency,
 		PublicUploadsEnabled:       publicUploadsEnabled,
 		DownloadWorkerEnabled:      downloadWorkerEnabled,
 		DownloadWorkerURLs:         downloadWorkerURLs,
@@ -470,6 +513,18 @@ func parseIntLimit(name string, fallback, minValue, maxValue int) (int, error) {
 	}
 	if value < minValue || value > maxValue {
 		return 0, fmt.Errorf("%s must be between %d and %d", name, minValue, maxValue)
+	}
+	return value, nil
+}
+
+func parseByteLimitAllowZero(name, fallback string) (int64, error) {
+	raw := envOr(name, fallback)
+	if strings.TrimSpace(raw) == "0" {
+		return 0, nil
+	}
+	value, err := units.ParseBytes(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return value, nil
 }

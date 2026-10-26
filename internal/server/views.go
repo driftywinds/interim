@@ -66,6 +66,7 @@ type APIDocsView struct {
 	MaxStorage       string
 	StorageUnlimited bool
 	PublicUploads    bool
+	MultipartEnabled bool
 	DownloadTTL      string
 	UploadURLTTL     string
 }
