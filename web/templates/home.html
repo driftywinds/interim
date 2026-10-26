@@ -26,7 +26,7 @@
 
     <section id="upload-gate" class="upload-gate" aria-labelledby="upload-gate-title"{{if .Status.PublicUploads}} hidden{{end}}>
         <h2 id="upload-gate-title">Restricted uploads</h2>
-        <p>This instance only accepts uploads from approved user hashes. Enter the user hash the admin gave you. It will be saved in this browser.</p>
+        <p>This instance only accepts uploads from approved user hashes. Enter the user hash the admin gave you. It will be saved in this browser. Email drifty at interim@drifty.win for access.</p>
         <form id="upload-hash-form" method="post" action="/">
             <label for="upload-hash">User hash</label>
             <input type="password" id="upload-hash" name="user_hash" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" required>
@@ -97,7 +97,7 @@
     <pre id="hash-result" class="hash-result" hidden><code id="hash-value"></code></pre>
     <p id="hash-warning" class="warn-text" hidden>Save this hash now — it is shown once and cannot be recovered.</p>
     {{else}}
-    <p>Uploads are restricted. User hashes are issued by the admin; public creation is disabled. Ask the admin if you need access.</p>
+    <p>Uploads are restricted. User hashes are issued by the admin; public creation is disabled. Email drifty at interim@drifty.win for access.</p>
     <p><a href="/api">Read the API docs</a></p>
     {{end}}
 </section>
