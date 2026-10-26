@@ -41,6 +41,12 @@ S3_AUTO_CREATE_BUCKET=false
 - `S3_PUBLIC_ENDPOINT` remains the B2 endpoint for uploads, not the Worker.
 - The Worker sets `Content-Disposition`, supports `HEAD`, and forwards `Range`
   so large downloads can resume.
+- `B2_KEY_PREFIX` is required and must end with `/`; the Worker fails closed
+  outside that prefix.
+- Worker URLs must use HTTPS. `DOWNLOAD_WORKER_URLS` rejects plain HTTP.
+- A token can be replayed until it expires, and every range/HEAD request counts
+  against the Worker quota. Add a Cloudflare rate-limiting rule for `/d/*`,
+  keep `DOWNLOAD_URL_TTL` short, and monitor request volume.
 
 Deploy the Worker from [worker/README.md](../worker/README.md). It includes the
 wrangler config, read-only B2 key scope, custom-domain setup, and the
@@ -50,3 +56,6 @@ Cloudflare's free Worker allowance is per account, not per Worker. Multiple
 Worker URLs are useful for separate deployments or redundancy, but using extra
 accounts to evade the free allowance is a terms-of-service risk. Cloudflare's
 large-file/video delivery policy still applies to the download domain.
+
+The Worker is stateless and cannot revoke an issued token early; expiry is the
+revocation mechanism. Treat `/d/*` as public and rate-limit it at Cloudflare.

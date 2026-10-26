@@ -15,7 +15,7 @@ B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
 B2_REGION = "us-west-004"
 B2_BUCKET = "interim"
 B2_ACCESS_KEY_ID = "replace-with-read-only-key-id"
-# Restrict the worker to interim's object prefix.
+# Required. Must end with "/" and match interim's S3_OBJECT_PREFIX.
 B2_KEY_PREFIX = "files/"
 # Optional: allowed browser origin for fetch()-style downloads.
 CORS_ORIGIN = "https://interim.example.com"

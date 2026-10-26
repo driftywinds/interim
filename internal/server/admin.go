@@ -1,9 +1,6 @@
 package server
 
 import (
-	"crypto/hmac"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -290,57 +287,64 @@ func (s *Server) handleAdminUpdateKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type adminKeyFlash struct {
-	Key     string `json:"key"`
-	Name    string `json:"name"`
-	Expires int64  `json:"expires"`
+	Key     string
+	Name    string
+	Expires time.Time
 }
 
 func (s *Server) setKeyFlash(w http.ResponseWriter, key, name string) {
-	payload, err := json.Marshal(adminKeyFlash{
-		Key:     key,
-		Name:    name,
-		Expires: s.now().UTC().Add(keyFlashTTL).Unix(),
-	})
+	flashID, err := randomToken(24)
 	if err != nil {
-		s.logger.Error("encode key flash", "error", err)
+		s.logger.Error("generate key flash id", "error", err)
 		return
 	}
-	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	now := s.now().UTC()
+	s.keyFlashMu.Lock()
+	if s.keyFlashes == nil {
+		s.keyFlashes = make(map[string]adminKeyFlash)
+	}
+	for id, flash := range s.keyFlashes {
+		if !flash.Expires.After(now) {
+			delete(s.keyFlashes, id)
+		}
+	}
+	s.keyFlashes[flashID] = adminKeyFlash{
+		Key:     key,
+		Name:    name,
+		Expires: now.Add(keyFlashTTL),
+	}
+	s.keyFlashMu.Unlock()
+
 	http.SetCookie(w, &http.Cookie{
-		Name:     keyFlashCookie,
-		Value:    encoded + "." + s.csrfSignature("keyflash:"+encoded),
-		Path:     "/admin",
+		Name:     s.cookieName(keyFlashCookie),
+		Value:    flashID,
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   s.cfg.CookieSecure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(keyFlashTTL.Seconds()),
-		Expires:  s.now().Add(keyFlashTTL),
+		Expires:  now.Add(keyFlashTTL),
 	})
 }
 
 func (s *Server) takeKeyFlash(w http.ResponseWriter, r *http.Request) (adminKeyFlash, bool) {
-	cookie, err := r.Cookie(keyFlashCookie)
+	cookie, err := r.Cookie(s.cookieName(keyFlashCookie))
 	if err != nil || cookie.Value == "" {
 		return adminKeyFlash{}, false
 	}
 	s.clearKeyFlash(w)
 
-	parts := strings.SplitN(cookie.Value, ".", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return adminKeyFlash{}, false
+	now := s.now().UTC()
+	s.keyFlashMu.Lock()
+	flash, ok := s.keyFlashes[cookie.Value]
+	delete(s.keyFlashes, cookie.Value)
+	for id, entry := range s.keyFlashes {
+		if !entry.Expires.After(now) {
+			delete(s.keyFlashes, id)
+		}
 	}
-	if !hmac.Equal([]byte(s.csrfSignature("keyflash:"+parts[0])), []byte(parts[1])) {
-		return adminKeyFlash{}, false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return adminKeyFlash{}, false
-	}
-	var flash adminKeyFlash
-	if err := json.Unmarshal(payload, &flash); err != nil {
-		return adminKeyFlash{}, false
-	}
-	if flash.Key == "" || flash.Expires < s.now().UTC().Unix() {
+	s.keyFlashMu.Unlock()
+	if !ok || flash.Key == "" || !flash.Expires.After(now) {
 		return adminKeyFlash{}, false
 	}
 	return flash, true
@@ -348,9 +352,9 @@ func (s *Server) takeKeyFlash(w http.ResponseWriter, r *http.Request) (adminKeyF
 
 func (s *Server) clearKeyFlash(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     keyFlashCookie,
+		Name:     s.cookieName(keyFlashCookie),
 		Value:    "",
-		Path:     "/admin",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   s.cfg.CookieSecure,
 		SameSite: http.SameSiteStrictMode,

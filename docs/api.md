@@ -40,7 +40,7 @@ curl -X DELETE https://files.example.com/api/v1/files/FILE_ID \
   -H 'Authorization: Bearer interim_...'
 ```
 
-Upload intents return a one-time `delete_token`; use
+Upload intents return a per-file `delete_token` (shown once); use
 `X-Delete-Token: <token>` with `DELETE /api/v1/files/{id}` to remove anonymous
 files. Raw user hashes, upload tokens, and delete tokens are stored only as
 SHA-256 hashes.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
@@ -25,6 +26,15 @@ func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
 		);
 		INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at)
 		VALUES ('legacy', X'00', 'interim_legacy', 'old', 1);
+
+		CREATE TABLE storage_reservations (
+			id         TEXT PRIMARY KEY,
+			bytes      INTEGER NOT NULL CHECK (bytes > 0),
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+		INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
+		VALUES ('legacy-reservation', 1, 1, 2);
 	`)
 	if err != nil {
 		db.Close()
@@ -59,5 +69,25 @@ func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
 	}
 	if key.CreatedAt.Unix() != 1 {
 		t.Fatalf("unexpected created_at: %v", key.CreatedAt)
+	}
+
+	var legacyOwner string
+	if err := st.db.QueryRow("SELECT owner FROM storage_reservations WHERE id = 'legacy-reservation'").Scan(&legacyOwner); err != nil {
+		t.Fatal(err)
+	}
+	if legacyOwner != "" {
+		t.Fatalf("legacy reservation owner = %q", legacyOwner)
+	}
+	now := time.Now()
+	reserved, err := st.ReserveStorage(context.Background(), "owned-reservation", 1, "key:test", ReservationLimits{}, now, now.Add(time.Hour))
+	if err != nil || !reserved {
+		t.Fatalf("reserve owned storage = %v, %v", reserved, err)
+	}
+	var owner string
+	if err := st.db.QueryRow("SELECT owner FROM storage_reservations WHERE id = 'owned-reservation'").Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "key:test" {
+		t.Fatalf("reservation owner = %q", owner)
 	}
 }

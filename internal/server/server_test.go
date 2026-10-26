@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,8 +31,9 @@ type fakeObject struct {
 }
 
 type fakeStore struct {
-	mu      sync.Mutex
-	objects map[string]fakeObject
+	mu          sync.Mutex
+	objects     map[string]fakeObject
+	healthCalls int
 }
 
 func newFakeStore() *fakeStore {
@@ -47,6 +50,21 @@ func (f *fakeStore) Delete(ctx context.Context, key string) error {
 	f.mu.Lock()
 	delete(f.objects, key)
 	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeStore) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	object, ok := f.objects[srcKey]
+	if !ok {
+		return objects.ErrNotFound
+	}
+	f.objects[dstKey] = fakeObject{
+		data:         append([]byte(nil), object.data...),
+		contentType:  contentType,
+		lastModified: time.Now(),
+	}
 	return nil
 }
 
@@ -91,6 +109,9 @@ func (f *fakeStore) List(ctx context.Context, prefix string) ([]objects.ObjectIn
 }
 
 func (f *fakeStore) Health(ctx context.Context) error {
+	f.mu.Lock()
+	f.healthCalls++
+	f.mu.Unlock()
 	return nil
 }
 
@@ -112,17 +133,22 @@ type testEnv struct {
 func newTestEnv(t *testing.T, maxStorage, maxFile int64) *testEnv {
 	t.Helper()
 	cfg := config.Config{
-		PublicBaseURL:        "https://files.test",
-		ListenAddr:           ":0",
-		MaxStorage:           maxStorage,
-		MaxFileSize:          maxFile,
-		Retention:            7 * 24 * time.Hour,
-		DownloadTTL:          5 * time.Minute,
-		UploadURLTTL:         30 * time.Minute,
-		UploadIntentTTL:      45 * time.Minute,
-		PublicUploadsEnabled: true,
-		SessionTTL:           time.Hour,
-		CookieSecure:         false,
+		PublicBaseURL:              "https://files.test",
+		ListenAddr:                 ":0",
+		MaxStorage:                 maxStorage,
+		MaxFileSize:                maxFile,
+		Retention:                  7 * 24 * time.Hour,
+		DownloadTTL:                5 * time.Minute,
+		UploadURLTTL:               30 * time.Minute,
+		UploadIntentTTL:            45 * time.Minute,
+		MaxFiles:                   100000,
+		MaxPendingUploadsPerClient: 2,
+		MaxReservedBytesPerClient:  maxFile,
+		PublicUploadsEnabled:       true,
+		SessionTTL:                 time.Hour,
+		CookieSecure:               false,
+		SetupToken:                 "0123456789abcdef0123456789abcdef",
+		SessionSecret:              []byte("0123456789abcdef0123456789abcdef"),
 		S3: config.S3Config{
 			Prefix:         "files/",
 			Bucket:         "test",
@@ -187,6 +213,7 @@ func (e *testEnv) setupAdmin(t *testing.T) {
 	csrf := extractCSRF(t, body)
 	form := url.Values{
 		"csrf_token":       {csrf},
+		"setup_token":      {e.server.cfg.SetupToken},
 		"username":         {"admin"},
 		"password":         {"correct-horse-battery"},
 		"password_confirm": {"correct-horse-battery"},
@@ -232,6 +259,10 @@ type uploadResult struct {
 	DeleteToken string
 	PageURL     string
 	Started     time.Time
+}
+
+func stagingKey(uploadID string) string {
+	return "files/uploads/" + uploadID
 }
 
 func (e *testEnv) createIntent(t *testing.T, userHash, name string, size int, contentType string) (int, []byte, uploadIntentDTO) {
@@ -291,7 +322,7 @@ func (e *testEnv) upload(t *testing.T, userHash, name string, data []byte) uploa
 	if status != http.StatusCreated {
 		return result
 	}
-	e.fake.putObject("files/"+intent.UploadID, data, time.Now())
+	e.fake.putObject(stagingKey(intent.UploadID), data, time.Now())
 
 	completeStatus, completeBody := e.completeIntent(t, intent.UploadID, intent.UploadToken)
 	result.Status = completeStatus
@@ -407,6 +438,201 @@ func TestPublicPagesAndAdminSetup(t *testing.T) {
 	status, body = getBody(t, env.client, env.http.URL+"/admin")
 	if status != http.StatusOK || !bytes.Contains([]byte(body), []byte("All files")) {
 		t.Fatalf("admin after setup status = %d", status)
+	}
+}
+
+func TestSetupRequiresSetupToken(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body := getBody(t, env.client, env.http.URL+"/setup")
+	if status != http.StatusOK || !bytes.Contains([]byte(body), []byte(`name="setup_token"`)) {
+		t.Fatalf("setup page status = %d, token field missing", status)
+	}
+	csrf := extractCSRF(t, body)
+	form := url.Values{
+		"csrf_token":       {csrf},
+		"setup_token":      {"wrong-token"},
+		"username":         {"admin"},
+		"password":         {"correct-horse-battery"},
+		"password_confirm": {"correct-horse-battery"},
+	}
+	response, err := env.client.PostForm(env.http.URL+"/setup", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong setup token status = %d", response.StatusCode)
+	}
+	if hasAdmin, err := env.store.HasAdmin(context.Background()); err != nil || hasAdmin {
+		t.Fatalf("admin should not exist: %v", err)
+	}
+	env.setupAdmin(t)
+}
+
+func TestCompletionCopiesToLiveObject(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	result := env.upload(t, "", "payload.txt", []byte("hello"))
+	if result.Status != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", result.Status, result.Body)
+	}
+	file, err := env.store.FileByID(context.Background(), result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(file.ObjectKey, "files/objects/") {
+		t.Fatalf("live object key = %q", file.ObjectKey)
+	}
+	if strings.Contains(file.ObjectKey, result.ID) {
+		t.Fatalf("live key is derivable from upload id: %q", file.ObjectKey)
+	}
+	if env.fake.exists(stagingKey(result.ID)) {
+		t.Fatal("staging object was not removed after commit")
+	}
+	if !env.fake.exists(file.ObjectKey) {
+		t.Fatal("live object is missing")
+	}
+
+	// Recreating the old staging key must not affect the committed file.
+	env.fake.putObject(stagingKey(result.ID), []byte("tampered and longer"), time.Now())
+	info, err := env.fake.Head(context.Background(), file.ObjectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size != int64(len("hello")) {
+		t.Fatalf("live object size = %d", info.Size)
+	}
+}
+
+func TestGlobalFileCountCap(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.server.cfg.MaxFiles = 1
+	result := env.upload(t, "", "first.txt", []byte("x"))
+	if result.Status != http.StatusCreated {
+		t.Fatalf("first upload = %d: %s", result.Status, result.Body)
+	}
+	status, body, _ := env.createIntent(t, "", "second.txt", 1, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("upload past file cap = %d: %s", status, body)
+	}
+}
+
+func TestReservationPerClientCaps(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.server.cfg.MaxPendingUploadsPerClient = 2
+	env.server.cfg.MaxReservedBytesPerClient = 20 << 20
+	for i := 0; i < 2; i++ {
+		status, body, _ := env.createIntent(t, "", "pending.bin", 1, "")
+		if status != http.StatusCreated {
+			t.Fatalf("intent %d status = %d: %s", i, status, body)
+		}
+	}
+	status, body, _ := env.createIntent(t, "", "third.bin", 1, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("third intent status = %d: %s", status, body)
+	}
+
+	_, userHash := env.createKey(t)
+	status, body, _ = env.createIntent(t, userHash, "owned.bin", 1, "")
+	if status != http.StatusCreated {
+		t.Fatalf("authenticated owner should have a separate reservation bucket: %d: %s", status, body)
+	}
+
+	bytesEnv := newTestEnv(t, 20<<20, 5<<20)
+	bytesEnv.server.cfg.MaxPendingUploadsPerClient = 10
+	bytesEnv.server.cfg.MaxReservedBytesPerClient = 2
+	status, body, _ = bytesEnv.createIntent(t, "", "one.bin", 1, "")
+	if status != http.StatusCreated {
+		t.Fatalf("first byte-capped intent = %d: %s", status, body)
+	}
+	status, body, _ = bytesEnv.createIntent(t, "", "two.bin", 2, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("second byte-capped intent = %d: %s", status, body)
+	}
+}
+
+func TestClientIPTrustedProxyChain(t *testing.T) {
+	s := &Server{cfg: config.Config{
+		TrustProxy: true,
+		TrustedProxyCIDRs: []netip.Prefix{
+			netip.MustParsePrefix("127.0.0.1/32"),
+			netip.MustParsePrefix("10.0.0.0/8"),
+		},
+	}}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.2, 10.0.0.3")
+	if got := s.clientIP(request); got != "203.0.113.9" {
+		t.Fatalf("trusted chain IP = %q", got)
+	}
+
+	direct := httptest.NewRequest(http.MethodGet, "/", nil)
+	direct.RemoteAddr = "198.51.100.7:1234"
+	direct.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := s.clientIP(direct); got != "198.51.100.7" {
+		t.Fatalf("untrusted peer spoofed IP = %q", got)
+	}
+
+	realIP := httptest.NewRequest(http.MethodGet, "/", nil)
+	realIP.RemoteAddr = "127.0.0.1:1234"
+	realIP.Header.Set("X-Real-IP", "203.0.113.10")
+	if got := s.clientIP(realIP); got != "203.0.113.10" {
+		t.Fatalf("trusted X-Real-IP = %q", got)
+	}
+}
+
+func TestRateLimiterMapIsBounded(t *testing.T) {
+	limiter := newRateLimiter()
+	now := time.Now()
+	limiter.mu.Lock()
+	for i := 0; i < maxRateLimitWindows; i++ {
+		limiter.windows[strconv.Itoa(i)] = &rateWindow{count: 1, reset: now.Add(time.Minute)}
+	}
+	limiter.mu.Unlock()
+	limiter.allow("new-key", 1, time.Minute)
+	limiter.mu.Lock()
+	size := len(limiter.windows)
+	limiter.mu.Unlock()
+	if size > maxRateLimitWindows {
+		t.Fatalf("limiter map size = %d", size)
+	}
+}
+
+func TestHealthzCachesStorageProbe(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	for i := 0; i < 2; i++ {
+		status, body := getBody(t, env.client, env.http.URL+"/healthz")
+		if status != http.StatusOK {
+			t.Fatalf("health status = %d: %s", status, body)
+		}
+	}
+	env.fake.mu.Lock()
+	calls := env.fake.healthCalls
+	env.fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("storage health calls = %d", calls)
+	}
+}
+
+func TestSecureCookieNamesUseHostPrefix(t *testing.T) {
+	secure := &Server{cfg: config.Config{CookieSecure: true}}
+	if got := secure.cookieName(adminCookie); got != "__Host-interim_admin" {
+		t.Fatalf("secure cookie name = %q", got)
+	}
+	local := &Server{cfg: config.Config{CookieSecure: false}}
+	if got := local.cookieName(adminCookie); got != "interim_admin" {
+		t.Fatalf("local cookie name = %q", got)
+	}
+}
+
+func TestSanitizeStripsBidiControls(t *testing.T) {
+	name := sanitizeFilename("invoice\u202Egnp.exe")
+	if strings.ContainsRune(name, '\u202E') {
+		t.Fatalf("bidi control survived sanitization: %q", name)
+	}
+	label := cleanLabel("label\u202Ename")
+	if strings.ContainsRune(label, '\u202E') {
+		t.Fatalf("bidi control survived label cleaning: %q", label)
 	}
 }
 
@@ -715,6 +941,10 @@ func TestExpiryAndCleanup(t *testing.T) {
 		t.Fatalf("upload status = %d: %s", result.Status, result.Body)
 	}
 
+	file, err := env.store.FileByID(context.Background(), result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	env.server.now = func() time.Time { return time.Now().Add(8 * 24 * time.Hour) }
 	status, _ := getBody(t, env.client, env.http.URL+"/f/"+result.ID)
 	if status != http.StatusGone {
@@ -725,7 +955,7 @@ func TestExpiryAndCleanup(t *testing.T) {
 		t.Fatalf("expired metadata status = %d", status)
 	}
 	env.server.MaintenanceOnce(context.Background())
-	if env.fake.exists("files/" + result.ID) {
+	if env.fake.exists(file.ObjectKey) {
 		t.Fatal("expired object was not removed")
 	}
 	if _, err := env.store.FileByID(context.Background(), result.ID); err == nil {
@@ -791,7 +1021,7 @@ func TestDirectUploadIntentAndIdempotentCompletion(t *testing.T) {
 		t.Fatalf("after intent usage = %+v", usage)
 	}
 
-	env.fake.putObject("files/"+intent.UploadID, []byte("hello world"), time.Now())
+	env.fake.putObject(stagingKey(intent.UploadID), []byte("hello world"), time.Now())
 	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
 	if completeStatus != http.StatusCreated {
 		t.Fatalf("complete status = %d: %s", completeStatus, completeBody)
@@ -815,12 +1045,12 @@ func TestUploadRejectsActualSizeMismatch(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create intent status = %d: %s", status, body)
 	}
-	env.fake.putObject("files/"+intent.UploadID, make([]byte, 20), time.Now())
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 20), time.Now())
 	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
 	if completeStatus != http.StatusRequestEntityTooLarge {
 		t.Fatalf("complete status = %d: %s", completeStatus, completeBody)
 	}
-	if env.fake.exists("files/" + intent.UploadID) {
+	if env.fake.exists(stagingKey(intent.UploadID)) {
 		t.Fatal("oversized object was not deleted")
 	}
 	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
@@ -839,7 +1069,7 @@ func TestAbortUploadDeletesObjectAndReservation(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create intent status = %d: %s", status, body)
 	}
-	env.fake.putObject("files/"+intent.UploadID, make([]byte, 10), time.Now())
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 10), time.Now())
 	request, _ := http.NewRequest(http.MethodDelete, env.http.URL+"/api/v1/uploads/"+intent.UploadID, nil)
 	request.Header.Set("X-Upload-Token", intent.UploadToken)
 	response, err := env.client.Do(request)
@@ -850,7 +1080,7 @@ func TestAbortUploadDeletesObjectAndReservation(t *testing.T) {
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("abort status = %d", response.StatusCode)
 	}
-	if env.fake.exists("files/" + intent.UploadID) {
+	if env.fake.exists(stagingKey(intent.UploadID)) {
 		t.Fatal("aborted object still exists")
 	}
 	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
@@ -869,10 +1099,10 @@ func TestJanitorExpiresAbandonedUpload(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create intent status = %d: %s", status, body)
 	}
-	env.fake.putObject("files/"+intent.UploadID, make([]byte, 10), time.Now())
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 10), time.Now())
 	env.server.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	env.server.MaintenanceOnce(context.Background())
-	if env.fake.exists("files/" + intent.UploadID) {
+	if env.fake.exists(stagingKey(intent.UploadID)) {
 		t.Fatal("janitor did not delete abandoned object")
 	}
 	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
@@ -892,12 +1122,12 @@ func TestJanitorOrphanSweepAtStartup(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("create intent status = %d: %s", status, body)
 	}
-	env.fake.putObject("files/"+active.UploadID, []byte("live"), time.Now())
+	env.fake.putObject(stagingKey(active.UploadID), []byte("live"), time.Now())
 	env.server.StartupMaintenance(context.Background())
 	if env.fake.exists("files/orphan-object") {
 		t.Fatal("startup sweep did not delete orphan object")
 	}
-	if !env.fake.exists("files/" + active.UploadID) {
+	if !env.fake.exists(stagingKey(active.UploadID)) {
 		t.Fatal("startup sweep deleted an active pending upload")
 	}
 }

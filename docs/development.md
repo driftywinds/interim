@@ -8,12 +8,14 @@ go vet ./...
 go run ./cmd/interim
 ```
 
-The test suite uses an in-memory fake object store and covers setup, auth,
-upload-intent creation, idempotent completion, direct upload verification,
-ownership, quota rejection, abort, janitor expiry, orphan sweeping, expiry
-cleanup, admin deletion, restricted-upload enforcement, admin-generated hashes,
-approval changes, and the legacy-schema migration. S3 integration, CORS, and
-presigned PUT behaviour must be tested against your provider.
+The test suite uses an in-memory fake object store and covers setup token
+enforcement, auth, upload-intent creation, staging-to-live copy-on-complete,
+idempotent completion, direct upload verification, ownership, per-client and
+global quota rejection, abort, janitor expiry, orphan sweeping, expiry cleanup,
+admin deletion, restricted-upload enforcement, admin-generated hashes, approval
+changes, trusted-proxy parsing, cookie naming, and schema migrations. S3
+integration, CORS, CopyObject, and presigned PUT behaviour must be tested
+against your provider.
 
 Build the binary directly:
 

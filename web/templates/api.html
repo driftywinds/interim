@@ -38,7 +38,7 @@
     <p>User hashes are issued by the admin, who also marks them approved for uploads. Public creation through <code>POST /keys</code> is disabled. Send your hash as a bearer credential:</p>
     {{end}}
     <pre><code>Authorization: Bearer interim_...</code></pre>
-    <p><code>X-API-Key: interim_...</code> is also accepted. Creating an upload intent is the only upload step that uses this credential; completion and abort use the separate one-time <code>upload_token</code> returned by the intent.</p>
+    <p><code>X-API-Key: interim_...</code> is also accepted. Creating an upload intent is the only upload step that uses this credential; completion and abort use the separate <code>upload_token</code>, which is valid until the intent expires.</p>
     <p><code>GET /keys/me</code> reports an <code>approved</code> flag. With public uploads disabled, only approved hashes may create upload intents.</p>
     <p><strong>Lost user hashes cannot be recovered.</strong> Only a SHA-256 hash is stored on the server.</p>
 

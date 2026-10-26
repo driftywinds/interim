@@ -68,6 +68,13 @@ type APIKeyUsage struct {
 	Bytes int64
 }
 
+type ReservationLimits struct {
+	TotalBytes    int64
+	TotalFiles    int64
+	ClientBytes   int64
+	ClientPending int
+}
+
 type UploadIntent struct {
 	ID              string
 	ObjectKey       string

@@ -61,6 +61,9 @@ npx wrangler secret put DOWNLOAD_TOKEN_SECRET
 `DOWNLOAD_TOKEN_SECRET` must exactly match interim's
 `DOWNLOAD_WORKER_SECRET`. It must be at least 32 characters.
 
+`B2_KEY_PREFIX` is required, must end with `/`, and is enforced fail-closed.
+`B2_ENDPOINT` must use HTTPS.
+
 Deploy:
 
 ```sh
@@ -81,8 +84,13 @@ DOWNLOAD_WORKER_SECRET=<same value as DOWNLOAD_TOKEN_SECRET>
 The download URL path is always `/d/<token>`. The configured URL must not
 include a path.
 
-When `DOWNLOAD_WORKER_ENABLED=false`, interim keeps its existing presigned S3
+`DOWNLOAD_WORKER_URLS` accepts only HTTPS URLs. When
+`DOWNLOAD_WORKER_ENABLED=false`, interim keeps its existing presigned S3
 download behavior.
+
+Add a Cloudflare rate-limiting rule for `/d/*`. The Worker is stateless, so a
+valid token can be replayed until it expires, and every `HEAD` or range request
+counts against the account's Worker quota.
 
 ## Multiple worker URLs / accounts
 
@@ -124,7 +132,8 @@ separate deployments, and review Cloudflare's terms for your traffic profile.
 
 The Worker makes one invocation per download, `HEAD`, or range request. Large
 files do not cost more requests, but download managers that issue many ranges
-do.
+do. Token replay is bounded only by `DOWNLOAD_URL_TTL` and the Cloudflare
+rate-limit rule you configure for `/d/*`.
 
 | Plan | Included | Overage |
 |---|---:|---:|
@@ -140,7 +149,7 @@ See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platf
 ## What the Worker does
 
 - Verifies the HMAC token and expiry.
-- Rejects objects outside `B2_KEY_PREFIX`.
+- Rejects objects outside the required `B2_KEY_PREFIX` (fail-closed).
 - Signs a path-style B2 S3 request with the read-only key.
 - Streams the B2 response without buffering it in Worker memory.
 - Forwards `Range` / `If-Range` and preserves `206 Partial Content`.

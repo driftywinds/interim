@@ -8,7 +8,9 @@ services:
     env_file:
       - .env
     ports:
-      - "8080:8080"
+      # Keep the Go listener off the public interfaces. Put Caddy,
+      # cloudflared, or another trusted proxy in front of it.
+      - "127.0.0.1:8080:8080"
     volumes:
       - interim-data:/data
     read_only: true

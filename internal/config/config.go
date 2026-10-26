@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,22 +32,28 @@ const (
 )
 
 type Config struct {
-	PublicBaseURL string
-	ListenAddr    string
-	DataDir       string
-	DatabasePath  string
-	SessionSecret []byte
-	SessionTTL    time.Duration
-	CookieSecure  bool
-	TrustProxy    bool
-	LogLevel      string
+	PublicBaseURL     string
+	ListenAddr        string
+	DataDir           string
+	DatabasePath      string
+	SessionSecret     []byte
+	SessionTTL        time.Duration
+	CookieSecure      bool
+	TrustProxy        bool
+	TrustedProxyCIDRs []netip.Prefix
+	SetupToken        string
+	SetupTokenPath    string
+	LogLevel          string
 
-	Retention       time.Duration
-	MaxStorage      int64
-	MaxFileSize     int64
-	DownloadTTL     time.Duration
-	UploadURLTTL    time.Duration
-	UploadIntentTTL time.Duration
+	Retention                  time.Duration
+	MaxStorage                 int64
+	MaxFileSize                int64
+	DownloadTTL                time.Duration
+	UploadURLTTL               time.Duration
+	UploadIntentTTL            time.Duration
+	MaxFiles                   int64
+	MaxPendingUploadsPerClient int
+	MaxReservedBytesPerClient  int64
 
 	PublicUploadsEnabled bool
 
@@ -64,6 +71,8 @@ type S3Config struct {
 	Bucket         string
 	AccessKey      string
 	SecretKey      string
+	PutAccessKey   string
+	PutSecretKey   string
 	Prefix         string
 	PathStyle      bool
 	AutoCreate     bool
@@ -96,6 +105,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	setupToken, setupTokenPath, err := loadSetupToken(dataDir)
+	if err != nil {
+		return Config{}, err
+	}
+
 	maxStorage, err := parseStorageLimit(envOr("MAX_STORAGE", "20GB"))
 	if err != nil {
 		return Config{}, fmt.Errorf("MAX_STORAGE: %w", err)
@@ -109,6 +123,22 @@ func Load() (Config, error) {
 	}
 	if maxFileSize > MaxSinglePutSize {
 		return Config{}, fmt.Errorf("MAX_FILE_SIZE cannot exceed %s because direct uploads use a single S3 PUT", units.FormatBytes(MaxSinglePutSize))
+	}
+
+	maxFiles, err := parseInt64Limit("MAX_FILES", 100000, 0, 1_000_000_000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxPending, err := parseIntLimit("MAX_PENDING_UPLOADS_PER_CLIENT", 2, 0, 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxReservedBytes, err := parseOptionalByteLimit(
+		"MAX_RESERVED_BYTES_PER_CLIENT",
+		strconv.FormatInt(maxFileSize, 10),
+	)
+	if err != nil {
+		return Config{}, err
 	}
 
 	retention, err := parseRetention(envOr("RETENTION", "7d"))
@@ -160,6 +190,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	trustedProxyCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return Config{}, err
+	}
+	if trustProxy && len(trustedProxyCIDRs) == 0 {
+		return Config{}, errors.New("TRUSTED_PROXY_CIDRS is required when TRUST_PROXY=true")
+	}
 
 	publicUploadsEnabled, err := parseBool("PUBLIC_UPLOADS_ENABLED", true)
 	if err != nil {
@@ -192,26 +229,32 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		PublicBaseURL:         publicBaseURL,
-		ListenAddr:            envOr("LISTEN_ADDR", ":8080"),
-		DataDir:               dataDir,
-		DatabasePath:          databasePath,
-		SessionSecret:         secret,
-		SessionTTL:            sessionTTL,
-		CookieSecure:          cookieSecure,
-		TrustProxy:            trustProxy,
-		LogLevel:              logLevel,
-		Retention:             retention,
-		MaxStorage:            maxStorage,
-		MaxFileSize:           maxFileSize,
-		DownloadTTL:           downloadTTL,
-		UploadURLTTL:          uploadURLTTL,
-		UploadIntentTTL:       uploadIntentTTL,
-		PublicUploadsEnabled:  publicUploadsEnabled,
-		DownloadWorkerEnabled: downloadWorkerEnabled,
-		DownloadWorkerURLs:    downloadWorkerURLs,
-		DownloadWorkerSecret:  downloadWorkerSecret,
-		S3:                    s3,
+		PublicBaseURL:              publicBaseURL,
+		ListenAddr:                 envOr("LISTEN_ADDR", ":8080"),
+		DataDir:                    dataDir,
+		DatabasePath:               databasePath,
+		SessionSecret:              secret,
+		SessionTTL:                 sessionTTL,
+		CookieSecure:               cookieSecure,
+		TrustProxy:                 trustProxy,
+		TrustedProxyCIDRs:          trustedProxyCIDRs,
+		SetupToken:                 setupToken,
+		SetupTokenPath:             setupTokenPath,
+		LogLevel:                   logLevel,
+		Retention:                  retention,
+		MaxStorage:                 maxStorage,
+		MaxFileSize:                maxFileSize,
+		DownloadTTL:                downloadTTL,
+		UploadURLTTL:               uploadURLTTL,
+		UploadIntentTTL:            uploadIntentTTL,
+		MaxFiles:                   maxFiles,
+		MaxPendingUploadsPerClient: maxPending,
+		MaxReservedBytesPerClient:  maxReservedBytes,
+		PublicUploadsEnabled:       publicUploadsEnabled,
+		DownloadWorkerEnabled:      downloadWorkerEnabled,
+		DownloadWorkerURLs:         downloadWorkerURLs,
+		DownloadWorkerSecret:       downloadWorkerSecret,
+		S3:                         s3,
 	}, nil
 }
 
@@ -239,8 +282,8 @@ func loadDownloadWorker(enabled bool, rawURLs, rawSecret string) ([]string, stri
 		if err != nil {
 			return nil, "", fmt.Errorf("DOWNLOAD_WORKER_URLS: %w", err)
 		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries must use http or https")
+		if parsed.Scheme != "https" {
+			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries must use https")
 		}
 		if parsed.Host == "" || parsed.User != nil {
 			return nil, "", errors.New("DOWNLOAD_WORKER_URLS entries must include a host and no credentials")
@@ -290,6 +333,11 @@ func loadS3() (S3Config, error) {
 	if (accessKey == "") != (secretKey == "") {
 		return S3Config{}, errors.New("S3_ACCESS_KEY and S3_SECRET_KEY must be set together (leave both empty for the instance role chain)")
 	}
+	putAccessKey := strings.TrimSpace(os.Getenv("S3_PUT_ACCESS_KEY"))
+	putSecretKey := strings.TrimSpace(os.Getenv("S3_PUT_SECRET_KEY"))
+	if (putAccessKey == "") != (putSecretKey == "") {
+		return S3Config{}, errors.New("S3_PUT_ACCESS_KEY and S3_PUT_SECRET_KEY must be set together")
+	}
 
 	pathStyle, err := parseBool("S3_FORCE_PATH_STYLE", true)
 	if err != nil {
@@ -313,6 +361,8 @@ func loadS3() (S3Config, error) {
 		Bucket:         bucket,
 		AccessKey:      accessKey,
 		SecretKey:      secretKey,
+		PutAccessKey:   putAccessKey,
+		PutSecretKey:   putSecretKey,
 		Prefix:         prefix,
 		PathStyle:      pathStyle,
 		AutoCreate:     autoCreate,
@@ -366,6 +416,98 @@ func optionalEndpoint(name, value string) (string, error) {
 		return "", fmt.Errorf("%s cannot contain a query or fragment", name)
 	}
 	return strings.TrimSuffix(value, "/"), nil
+}
+
+func loadSetupToken(dataDir string) (string, string, error) {
+	if configured := strings.TrimSpace(os.Getenv("SETUP_TOKEN")); configured != "" {
+		if len(configured) < 32 {
+			return "", "", errors.New("SETUP_TOKEN must be at least 32 characters")
+		}
+		return configured, "", nil
+	}
+
+	path := filepath.Join(dataDir, "setup_token")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		token := strings.TrimSpace(string(data))
+		if len(token) < 32 {
+			return "", "", fmt.Errorf("%s is invalid; remove it or set SETUP_TOKEN", path)
+		}
+		return token, path, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", "", fmt.Errorf("read setup token: %w", err)
+	}
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", fmt.Errorf("generate setup token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return "", "", fmt.Errorf("write setup token: %w", err)
+	}
+	return token, path, nil
+}
+
+func parseInt64Limit(name string, fallback, minValue, maxValue int64) (int64, error) {
+	raw := envOr(name, strconv.FormatInt(fallback, 10))
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	if value < minValue || value > maxValue {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minValue, maxValue)
+	}
+	return value, nil
+}
+
+func parseIntLimit(name string, fallback, minValue, maxValue int) (int, error) {
+	raw := envOr(name, strconv.Itoa(fallback))
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	if value < minValue || value > maxValue {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minValue, maxValue)
+	}
+	return value, nil
+}
+
+func parseOptionalByteLimit(name, fallback string) (int64, error) {
+	raw := envOr(name, fallback)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "0", "0b", "unlimited":
+		return 0, nil
+	}
+	value, err := units.ParseBytes(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return value, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || unicode.IsSpace(r)
+	})
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(part)
+			if addrErr != nil {
+				return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS: invalid CIDR or IP %q", part)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 func loadSessionSecret(dataDir string) ([]byte, error) {

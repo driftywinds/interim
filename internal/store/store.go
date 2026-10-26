@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -72,17 +72,32 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // EXISTS. Existing user hashes deliberately start unapproved: enabling the
 // upload allowlist must not silently authorize hashes created earlier.
 func migrate(ctx context.Context, db *sql.DB) error {
-	var approvedColumns int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name = 'approved'`,
-	).Scan(&approvedColumns); err != nil {
-		return fmt.Errorf("inspect api_keys schema: %w", err)
+	if err := ensureColumn(ctx, db, "api_keys", "approved",
+		`ALTER TABLE api_keys ADD COLUMN approved INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))`); err != nil {
+		return err
 	}
-	if approvedColumns == 0 {
-		if _, err := db.ExecContext(ctx,
-			`ALTER TABLE api_keys ADD COLUMN approved INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))`,
-		); err != nil {
-			return fmt.Errorf("add api_keys.approved: %w", err)
+	if err := ensureColumn(ctx, db, "storage_reservations", "owner",
+		`ALTER TABLE storage_reservations ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS storage_reservations_owner_expires
+		 ON storage_reservations(owner, expires_at)`,
+	); err != nil {
+		return fmt.Errorf("create reservation owner index: %w", err)
+	}
+	return nil
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, table, column, alter string) error {
+	var count int
+	query := `SELECT COUNT(*) FROM pragma_table_info('` + table + `') WHERE name = ?`
+	if err := db.QueryRowContext(ctx, query, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	if count == 0 {
+		if _, err := db.ExecContext(ctx, alter); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, column, err)
 		}
 	}
 	return nil

@@ -47,6 +47,7 @@ CREATE INDEX IF NOT EXISTS files_created_at ON files(created_at DESC);
 CREATE TABLE IF NOT EXISTS storage_reservations (
     id         TEXT PRIMARY KEY,
     bytes      INTEGER NOT NULL CHECK (bytes > 0),
+    owner      TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 );

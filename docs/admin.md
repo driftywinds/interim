@@ -1,7 +1,7 @@
 # Admin
 
-`/admin` is gated by a DB-backed session created during first-run setup. The
-admin can:
+`/admin` is gated by a DB-backed session created during first-run setup. Setup
+requires the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`). The admin can:
 
 - see storage usage, the hard cap, active reservations, and every file;
 - search by filename or ID and paginate;

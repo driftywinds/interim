@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const maxRateLimitWindows = 20000
+
 type rateWindow struct {
 	count int
 	reset time.Time
@@ -34,13 +36,19 @@ func (l *rateLimiter) allow(key string, limit int, window time.Duration) (bool, 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if now.Sub(l.lastGC) > 10*time.Minute || len(l.windows) > 10000 {
+	if now.Sub(l.lastGC) > 10*time.Minute {
 		for k, w := range l.windows {
 			if now.After(w.reset) {
 				delete(l.windows, k)
 			}
 		}
 		l.lastGC = now
+	}
+	for len(l.windows) >= maxRateLimitWindows {
+		for key := range l.windows {
+			delete(l.windows, key)
+			break
+		}
 	}
 
 	entry, ok := l.windows[key]

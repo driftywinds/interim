@@ -120,11 +120,31 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "database": "unavailable"})
 		return
 	}
-	if err := s.objects.Health(ctx); err != nil {
+	if err := s.cachedStorageHealth(ctx); err != nil {
 		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "storage": "unavailable"})
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// cachedStorageHealth protects the public health endpoint from turning into an
+// unbounded HeadBucket amplifier.
+func (s *Server) cachedStorageHealth(ctx context.Context) error {
+	now := s.now()
+	s.healthMu.Lock()
+	if !s.healthChecked.IsZero() && now.Sub(s.healthChecked) < 10*time.Second {
+		err := s.healthErr
+		s.healthMu.Unlock()
+		return err
+	}
+	s.healthMu.Unlock()
+
+	err := s.objects.Health(ctx)
+	s.healthMu.Lock()
+	s.healthChecked = now
+	s.healthErr = err
+	s.healthMu.Unlock()
+	return err
 }
 
 func (s *Server) handleRobots(w http.ResponseWriter, r *http.Request) {

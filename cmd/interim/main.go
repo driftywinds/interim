@@ -51,6 +51,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	hasAdmin, err := st.HasAdmin(ctx)
+	if err != nil {
+		logger.Error("check admin account", "error", err)
+		os.Exit(1)
+	}
+	if hasAdmin {
+		if cfg.SetupTokenPath != "" {
+			if err := os.Remove(cfg.SetupTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Warn("remove unused setup token", "error", err)
+			}
+		}
+	} else {
+		logger.Info("admin setup required",
+			"url", cfg.PublicBaseURL+"/setup",
+			"setup_token_file", cfg.SetupTokenPath,
+			"setup_token_from_env", cfg.SetupTokenPath == "",
+		)
+	}
+
 	storage, err := objects.NewS3(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("connect object storage", "error", err)
@@ -70,6 +89,8 @@ func main() {
 		Addr:              cfg.ListenAddr,
 		Handler:           app.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
@@ -82,6 +103,9 @@ func main() {
 			"storage_limit", cfg.MaxStorage,
 			"storage_unlimited", cfg.MaxStorage == 0,
 			"max_file_size", cfg.MaxFileSize,
+			"max_files", cfg.MaxFiles,
+			"max_pending_uploads_per_client", cfg.MaxPendingUploadsPerClient,
+			"max_reserved_bytes_per_client", cfg.MaxReservedBytesPerClient,
 			"upload_url_ttl", cfg.UploadURLTTL.String(),
 			"upload_intent_ttl", cfg.UploadIntentTTL.String(),
 			"retention", cfg.Retention.String(),

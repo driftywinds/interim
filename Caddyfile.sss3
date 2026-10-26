@@ -9,6 +9,15 @@
 # so sss3 sees "sss3.drifty.win" even though Cloudflare connects to localhost.
 
 :8080 {
+	# A presigned PutObject must never be able to switch into CopyObject or
+	# UploadPartCopy. sss3 (and some other S3 clones) can otherwise be tricked
+	# into copying an arbitrary readable object into the uploader's key.
+	@copyop header X-Amz-Copy-Source *
+	respond @copyop "CopyObject is not allowed on the public endpoint" 403
+
+	@copyrange header X-Amz-Copy-Source-Range *
+	respond @copyrange "CopyPart is not allowed on the public endpoint" 403
+
 	@options method OPTIONS
 	handle @options {
 		header {
@@ -29,8 +38,8 @@
 		}
 
 		reverse_proxy stupid-simple-s3:5553 {
-			# Required: do not let Caddy replace the host with the container name.
-			header_up Host {http.request.host}
+			# Required: preserve the host and, for Tailscale, the port.
+			header_up Host {http.request.hostport}
 		}
 	}
 }

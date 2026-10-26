@@ -32,11 +32,17 @@ export default {
             typeof claims.n !== "string" || claims.n.length === 0) {
             return errorResponse(403, "Invalid download token payload", env, request);
         }
-        if (env.B2_KEY_PREFIX && !claims.k.startsWith(env.B2_KEY_PREFIX)) {
+        const keyPrefix = String(env.B2_KEY_PREFIX || "");
+        if (!keyPrefix.endsWith("/") || !claims.k.startsWith(keyPrefix)) {
             return errorResponse(403, "Object is outside the configured prefix", env, request);
         }
 
-        const b2URL = objectURL(env, claims.k);
+        let b2URL;
+        try {
+            b2URL = objectURL(env, claims.k);
+        } catch (err) {
+            return errorResponse(500, "Storage is not configured", env, request);
+        }
         const upstreamHeaders = new Headers();
         for (const name of ["range", "if-range", "if-none-match", "if-modified-since"]) {
             const value = request.headers.get(name);
@@ -137,6 +143,9 @@ async function verifyToken(token, env) {
 
 function objectURL(env, key) {
     const endpoint = String(env.B2_ENDPOINT || "").replace(/\/+$/, "");
+    if (!endpoint.startsWith("https://") || !env.B2_BUCKET) {
+        throw new Error("B2 endpoint or bucket is not configured");
+    }
     const bucket = encodeURIComponent(env.B2_BUCKET);
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
     return `${endpoint}/${bucket}/${encodedKey}`;

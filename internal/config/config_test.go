@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +51,79 @@ func TestLoad(t *testing.T) {
 	}
 	if !cfg.PublicUploadsEnabled {
 		t.Error("public uploads should default to enabled")
+	}
+	if len(cfg.SetupToken) < 32 || cfg.SetupTokenPath == "" {
+		t.Errorf("setup token was not generated: token=%d path=%q", len(cfg.SetupToken), cfg.SetupTokenPath)
+	}
+	if info, err := os.Stat(cfg.SetupTokenPath); err != nil {
+		t.Errorf("stat setup token: %v", err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("setup token mode = %o", info.Mode().Perm())
+	}
+	if cfg.MaxFiles != 100000 {
+		t.Errorf("max files = %d", cfg.MaxFiles)
+	}
+	if cfg.MaxPendingUploadsPerClient != 2 {
+		t.Errorf("max pending uploads = %d", cfg.MaxPendingUploadsPerClient)
+	}
+	if cfg.MaxReservedBytesPerClient != cfg.MaxFileSize {
+		t.Errorf("max reserved bytes = %d", cfg.MaxReservedBytesPerClient)
+	}
+}
+
+func TestSetupTokenCanBeSuppliedByEnv(t *testing.T) {
+	withBaseEnv(t)
+	token := strings.Repeat("s", 32)
+	t.Setenv("SETUP_TOKEN", token)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SetupToken != token || cfg.SetupTokenPath != "" {
+		t.Fatalf("setup token = %q path = %q", cfg.SetupToken, cfg.SetupTokenPath)
+	}
+}
+
+func TestTrustedProxyConfig(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("TRUST_PROXY", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected TRUST_PROXY without TRUSTED_PROXY_CIDRS to fail")
+	}
+
+	t.Setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32, ::1, 10.0.0.0/8")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 3 {
+		t.Fatalf("trusted proxies = %v", cfg.TrustedProxyCIDRs)
+	}
+	if cfg.TrustedProxyCIDRs[1].String() != "::1/128" {
+		t.Errorf("bare IPv6 was not normalized: %v", cfg.TrustedProxyCIDRs[1])
+	}
+
+	t.Setenv("TRUSTED_PROXY_CIDRS", "not-a-cidr")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid trusted proxy CIDR to fail")
+	}
+}
+
+func TestS3PutCredentials(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("S3_PUT_ACCESS_KEY", "put-access")
+	t.Setenv("S3_PUT_SECRET_KEY", "put-secret")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.S3.PutAccessKey != "put-access" || cfg.S3.PutSecretKey != "put-secret" {
+		t.Fatalf("put credentials = %q / %q", cfg.S3.PutAccessKey, cfg.S3.PutSecretKey)
+	}
+
+	t.Setenv("S3_PUT_SECRET_KEY", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected incomplete put credentials to fail")
 	}
 }
 
@@ -123,6 +198,7 @@ func TestDownloadWorkerConfigRequiresURLsAndSecret(t *testing.T) {
 		"missing secret": {urls: "https://dl.example.test", secret: ""},
 		"short secret":   {urls: "https://dl.example.test", secret: "short"},
 		"URL with path":  {urls: "https://dl.example.test/base", secret: "0123456789abcdef0123456789abcdef"},
+		"plain HTTP URL": {urls: "http://dl.example.test", secret: "0123456789abcdef0123456789abcdef"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -168,14 +244,18 @@ func TestRetentionFormats(t *testing.T) {
 
 func TestLoadRejectsBadValues(t *testing.T) {
 	tests := map[string]string{
-		"PUBLIC_BASE_URL":        "",
-		"MAX_STORAGE":            "nope",
-		"MAX_FILE_SIZE":          "6GB",
-		"S3_BUCKET":              "",
-		"COOKIE_SECURE":          "sometimes",
-		"PUBLIC_UPLOADS_ENABLED": "sometimes",
-		"UPLOAD_INTENT_TTL":      "10m",
-		"UPLOAD_URL_TTL":         "3h",
+		"PUBLIC_BASE_URL":                "",
+		"MAX_STORAGE":                    "nope",
+		"MAX_FILE_SIZE":                  "6GB",
+		"S3_BUCKET":                      "",
+		"COOKIE_SECURE":                  "sometimes",
+		"PUBLIC_UPLOADS_ENABLED":         "sometimes",
+		"MAX_FILES":                      "many",
+		"MAX_PENDING_UPLOADS_PER_CLIENT": "many",
+		"MAX_RESERVED_BYTES_PER_CLIENT":  "nope",
+		"SETUP_TOKEN":                    "short",
+		"UPLOAD_INTENT_TTL":              "10m",
+		"UPLOAD_URL_TTL":                 "3h",
 	}
 	for name, value := range tests {
 		t.Run(name, func(t *testing.T) {

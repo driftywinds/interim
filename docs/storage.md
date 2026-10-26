@@ -20,9 +20,29 @@ and credentials. If you do not expose S3 directly, put it behind a reverse
 proxy; do not rewrite the signed host/path.
 
 The bucket should be private. The browser receives a PUT URL scoped to one
-object key and a short expiry. interim sets `Content-Disposition: attachment`
-through the signed PUT headers; in S3 download mode it also adds a response
-override to signed GETs. In worker mode the Worker sets the response header.
+staging object key and a short expiry. interim sets `Content-Disposition:
+attachment` through the signed PUT headers; in S3 download mode it also adds a
+response override to signed GETs. In worker mode the Worker sets the response
+header.
+
+## Upload staging and write-only credentials
+
+Presigned browser PUTs write to `<S3_OBJECT_PREFIX>uploads/<upload-id>`. After
+verifying the staging object's size, the server copies it with `CopyObject` to
+`<S3_OBJECT_PREFIX>objects/<random>` and commits only the live key. The client
+never receives a URL for the live key, and the public endpoint should reject
+`X-Amz-Copy-Source` and `X-Amz-Copy-Source-Range` so a presigned PUT cannot be
+switched into a server-side copy.
+
+For providers that support write-only credentials, set
+`S3_PUT_ACCESS_KEY` and `S3_PUT_SECRET_KEY`. Those credentials are used only
+for presigning browser PUTs; `S3_ACCESS_KEY` / `S3_SECRET_KEY` retain read,
+copy, list, and delete access. On AWS, the upload identity needs only
+`s3:PutObject` on the bucket/prefix. On B2, use a key with `writeFiles` only.
+sss3 has no write-only credential, so its public proxy must enforce the
+CopyObject block instead. Do not assume B2, R2, MinIO, or NooBaa rejects an
+unsigned `X-Amz-Copy-Source`; use write-only upload credentials and/or a proxy
+rule, and verify the provider's behavior.
 
 ## Required bucket CORS
 

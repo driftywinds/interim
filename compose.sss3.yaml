@@ -12,7 +12,8 @@ name: sss3
 
 services:
   stupid-simple-s3:
-    image: ghcr.io/espebra/stupid-simple-s3:latest
+    # For production, pin this by digest (or set SSS3_IMAGE to a digest).
+    image: ${SSS3_IMAGE:-ghcr.io/espebra/stupid-simple-s3:latest}
     container_name: stupid-simple-s3
     restart: unless-stopped
     environment:

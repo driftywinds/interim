@@ -493,12 +493,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 
 func cleanLabel(value string) string {
 	value = strings.TrimSpace(value)
-	value = strings.Map(func(r rune) rune {
-		if r < 32 || r == 127 {
-			return -1
-		}
-		return r
-	}, value)
+	value = strings.Map(stripFormattingRune, value)
 	if len(value) > 64 {
 		value = value[:64]
 	}

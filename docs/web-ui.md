@@ -6,7 +6,7 @@ intent. Upload URLs are short-lived, so a slow upload can fail before completion
 the UI reports that and tells the user to try again.
 
 Completed uploads are stored in `localStorage` under `interim.uploads.v1`,
-including the one-time delete token. Only that browser can see the list.
+including the per-file delete token. Only that browser can see the list.
 Clearing site data loses the local delete ability, but the file still expires
 after the configured `RETENTION` period and the admin can delete it.
 

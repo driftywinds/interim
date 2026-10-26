@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ const (
 )
 
 func (s *Server) adminSession(r *http.Request) (store.Session, bool) {
-	cookie, err := r.Cookie(adminCookie)
+	cookie, err := r.Cookie(s.cookieName(adminCookie))
 	if err != nil || cookie.Value == "" {
 		return store.Session{}, false
 	}
@@ -55,7 +56,7 @@ func (s *Server) createAdminSession(ctx context.Context, w http.ResponseWriter, 
 		return err
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     adminCookie,
+		Name:     s.cookieName(adminCookie),
 		Value:    rawToken,
 		Path:     "/",
 		HttpOnly: true,
@@ -69,7 +70,7 @@ func (s *Server) createAdminSession(ctx context.Context, w http.ResponseWriter, 
 
 func (s *Server) clearAdminCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     adminCookie,
+		Name:     s.cookieName(adminCookie),
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
@@ -81,7 +82,7 @@ func (s *Server) clearAdminCookie(w http.ResponseWriter) {
 }
 
 func (s *Server) preauthCSRF(w http.ResponseWriter, r *http.Request) string {
-	if cookie, err := r.Cookie(preauthCookie); err == nil && s.validPreauthCSRF(cookie.Value) {
+	if cookie, err := r.Cookie(s.cookieName(preauthCookie)); err == nil && s.validPreauthCSRF(cookie.Value) {
 		return cookie.Value
 	}
 	raw, err := randomToken(32)
@@ -91,7 +92,7 @@ func (s *Server) preauthCSRF(w http.ResponseWriter, r *http.Request) string {
 	}
 	token := raw + "." + s.csrfSignature(raw)
 	http.SetCookie(w, &http.Cookie{
-		Name:     preauthCookie,
+		Name:     s.cookieName(preauthCookie),
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
@@ -118,7 +119,7 @@ func (s *Server) validPreauthCSRF(value string) bool {
 }
 
 func (s *Server) validatePreauthCSRF(r *http.Request) bool {
-	cookie, err := r.Cookie(preauthCookie)
+	cookie, err := r.Cookie(s.cookieName(preauthCookie))
 	if err != nil || cookie.Value == "" || !s.validPreauthCSRF(cookie.Value) {
 		return false
 	}
@@ -128,7 +129,7 @@ func (s *Server) validatePreauthCSRF(r *http.Request) bool {
 
 func (s *Server) clearPreauthCSRF(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     preauthCookie,
+		Name:     s.cookieName(preauthCookie),
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
@@ -197,8 +198,18 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
+	rateKey := "setup:" + s.clientIP(r)
+	if allowed, retry := s.limiter.allow(rateKey, 5, 15*time.Minute); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		s.renderSetupError(w, r, http.StatusTooManyRequests, "Too many setup attempts. Try again later.")
+		return
+	}
 	if !s.parseAdminForm(w, r) || !s.validatePreauthCSRF(r) {
 		s.renderError(w, r, http.StatusBadRequest, "Invalid form", "The setup form expired. Reload and try again.")
+		return
+	}
+	if !constantTimeEqualString(s.cfg.SetupToken, strings.TrimSpace(r.PostFormValue("setup_token"))) {
+		s.renderSetupError(w, r, http.StatusForbidden, "Incorrect setup token. Read it from DATA_DIR/setup_token or SETUP_TOKEN.")
 		return
 	}
 
@@ -250,9 +261,26 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
+	s.limiter.reset(rateKey)
 	s.clearPreauthCSRF(w)
+	if s.cfg.SetupTokenPath != "" {
+		if err := os.Remove(s.cfg.SetupTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("remove setup token after setup", "error", err)
+		}
+	}
 	s.logger.Info("admin account created", "username", admin.Username)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (s *Server) renderSetupError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	page := s.authPageData(r, "setup")
+	page.CSRF = s.preauthCSRF(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	s.render(w, r, status, "auth", AuthView{
+		PageData: page,
+		Mode:     "setup",
+		Error:    message,
+	})
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {

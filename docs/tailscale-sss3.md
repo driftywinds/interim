@@ -50,8 +50,8 @@ reverse_proxy stupid-simple-s3:5553 {
 Do not use `{http.request.host}` here. That placeholder strips the port. A
 request to `http://100.x.y.z:5554` is signed for
 `Host: 100.x.y.z:5554`; stripping the port to `100.x.y.z` produces
-`SignatureDoesNotMatch` from sss3. If the checked-in `Caddyfile.sss3` still has
-`{http.request.host}`, change that line before reloading.
+`SignatureDoesNotMatch` from sss3. The checked-in `Caddyfile.sss3` also keeps
+the `X-Amz-Copy-Source` rejection; preserve that rule.
 
 Reload Caddy after the change:
 
@@ -118,6 +118,12 @@ append this block; do not replace the existing configuration:
 
 ```caddyfile
 sss3.example.com {
+    @copyop header X-Amz-Copy-Source *
+    respond @copyop "CopyObject is not allowed on the public endpoint" 403
+
+    @copyrange header X-Amz-Copy-Source-Range *
+    respond @copyrange "CopyPart is not allowed on the public endpoint" 403
+
     reverse_proxy 100.x.y.z:5554 {
         header_up Host {http.request.hostport}
     }
@@ -126,8 +132,9 @@ sss3.example.com {
 
 The VPS Caddy only terminates public TLS and proxies. The home Caddy still
 handles CORS, so do not add a second `Access-Control-Allow-Origin` here; two
-values make browsers reject the response. Caddy obtains the public certificate
-automatically once the DNS record and ports are correct.
+values make browsers reject the response. The checked-in
+[Caddyfile.sss3](../Caddyfile.sss3) also blocks the copy headers. Caddy obtains
+the public certificate automatically once the DNS record and ports are correct.
 
 Reload and test:
 
@@ -168,11 +175,11 @@ Important details:
 
 - `S3_PUBLIC_ENDPOINT` is embedded in browser presigned PUT/GET URLs. It must
   be the public VPS hostname.
-- `S3_ENDPOINT` is used by interim for `HeadObject`, `ListObjectsV2`, and
-  deletes. It can use the tailnet address and never goes through Cloudflare.
-  If interim cannot reach the tailnet address, use
-  `S3_ENDPOINT=https://sss3.example.com`; server-side calls then take the VPS
-  round trip.
+- `S3_ENDPOINT` is used by interim for `HeadObject`, `CopyObject`,
+  `ListObjectsV2`, and deletes. It must use the tailnet address or another
+  direct/private route, never the public VPS Caddy. The public proxy blocks
+  `CopyObject`, which completion needs for the staging-to-live copy. If interim
+  cannot reach the tailnet, place it on the tailnet or provide a private route.
 - If interim shares a Docker network with sss3, `S3_ENDPOINT` can instead be
   `http://stupid-simple-s3:5553`. If it points at the Caddy container, use the
   Caddy port and keep `{http.request.hostport}`.

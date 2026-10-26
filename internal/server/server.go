@@ -14,9 +14,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -52,6 +54,13 @@ type Server struct {
 	limiter   *rateLimiter
 	dummyHash []byte
 	now       func() time.Time
+
+	keyFlashMu sync.Mutex
+	keyFlashes map[string]adminKeyFlash
+
+	healthMu      sync.Mutex
+	healthChecked time.Time
+	healthErr     error
 }
 
 func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Logger) (*Server, error) {
@@ -74,17 +83,18 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 	}
 
 	s := &Server{
-		cfg:       cfg,
-		store:     st,
-		objects:   obj,
-		logger:    logger,
-		templates: templates,
-		static:    http.FileServerFS(staticFS),
-		downloads: downloads,
-		limiter:   newRateLimiter(),
-		now:       time.Now,
+		cfg:        cfg,
+		store:      st,
+		objects:    obj,
+		logger:     logger,
+		templates:  templates,
+		static:     http.FileServerFS(staticFS),
+		downloads:  downloads,
+		limiter:    newRateLimiter(),
+		now:        time.Now,
+		keyFlashes: make(map[string]adminKeyFlash),
 	}
-	dummy, err := bcrypt.GenerateFromPassword([]byte("interim-dummy-password"), bcrypt.DefaultCost)
+	dummy, err := bcrypt.GenerateFromPassword([]byte("interim-dummy-password"), 12)
 	if err != nil {
 		return nil, fmt.Errorf("generate dummy password hash: %w", err)
 	}
@@ -149,6 +159,13 @@ func (s *Server) Handler() http.Handler {
 	handler = s.recoverMiddleware(handler)
 	handler = s.securityHeadersMiddleware(handler)
 	return handler
+}
+
+func (s *Server) cookieName(base string) string {
+	if s.cfg.CookieSecure {
+		return "__Host-" + base
+	}
+	return base
 }
 
 func (s *Server) basePage(r *http.Request, title, active string) PageData {
@@ -366,12 +383,7 @@ func sanitizeFilename(name string) string {
 	name = strings.TrimSpace(name)
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.ReplaceAll(name, "/", "_")
-	name = strings.Map(func(r rune) rune {
-		if r == 0 || unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, name)
+	name = strings.Map(stripFormattingRune, name)
 	name = strings.Trim(name, ". ")
 	if name == "" {
 		name = "file"
@@ -388,6 +400,13 @@ func sanitizeFilename(name string) string {
 		name = name[:cut] + ext
 	}
 	return name
+}
+
+func stripFormattingRune(r rune) rune {
+	if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		return -1
+	}
+	return r
 }
 
 func randomToken(bytes int) (string, error) {
@@ -416,22 +435,55 @@ func requestID() string {
 }
 
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			first := strings.TrimSpace(strings.Split(forwarded, ",")[0])
-			if net.ParseIP(first) != nil {
-				return first
-			}
-		}
-		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-			if net.ParseIP(realIP) != nil {
-				return realIP
+	remote := remoteHost(r.RemoteAddr)
+	remoteAddr, err := netip.ParseAddr(remote)
+	if err != nil {
+		return remote
+	}
+	remoteAddr = remoteAddr.Unmap()
+	if !s.cfg.TrustProxy || !s.isTrustedProxy(remoteAddr) {
+		return remoteAddr.String()
+	}
+
+	var chain []string
+	for _, header := range r.Header.Values("X-Forwarded-For") {
+		for _, part := range strings.Split(header, ",") {
+			if ip := strings.TrimSpace(part); ip != "" {
+				chain = append(chain, ip)
 			}
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	for i := len(chain) - 1; i >= 0; i-- {
+		addr, err := netip.ParseAddr(chain[i])
+		if err != nil {
+			continue
+		}
+		addr = addr.Unmap()
+		if !s.isTrustedProxy(addr) {
+			return addr.String()
+		}
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		if addr, err := netip.ParseAddr(realIP); err == nil {
+			return addr.Unmap().String()
+		}
+	}
+	return remoteAddr.String()
+}
+
+func (s *Server) isTrustedProxy(addr netip.Addr) bool {
+	for _, prefix := range s.cfg.TrustedProxyCIDRs {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return remoteAddr
 	}
 	return host
 }

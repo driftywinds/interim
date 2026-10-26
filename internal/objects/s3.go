@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type ObjectInfo struct {
 
 type Store interface {
 	Delete(ctx context.Context, key string) error
+	Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error
 	PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error)
 	PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error)
 	Head(ctx context.Context, key string) (ObjectInfo, error)
@@ -43,10 +45,11 @@ type Store interface {
 }
 
 type S3Store struct {
-	client    *s3.Client
-	presigner *s3.PresignClient
-	bucket    string
-	logger    *slog.Logger
+	client       *s3.Client
+	presigner    *s3.PresignClient
+	putPresigner *s3.PresignClient
+	bucket       string
+	logger       *slog.Logger
 }
 
 func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Store, error) {
@@ -70,8 +73,8 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 	}
 	awsCfg.HTTPClient = s3HTTPClient()
 
-	newClient := func(endpoint string) *s3.Client {
-		return s3.NewFromConfig(awsCfg, func(options *s3.Options) {
+	newClient := func(base aws.Config, endpoint string) *s3.Client {
+		return s3.NewFromConfig(base, func(options *s3.Options) {
 			if endpoint != "" {
 				options.BaseEndpoint = aws.String(endpoint)
 			}
@@ -93,17 +96,26 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 		})
 	}
 
-	client := newClient(cfg.S3.Endpoint)
+	client := newClient(awsCfg, cfg.S3.Endpoint)
 	publicClient := client
 	if cfg.S3.PublicEndpoint != cfg.S3.Endpoint {
-		publicClient = newClient(cfg.S3.PublicEndpoint)
+		publicClient = newClient(awsCfg, cfg.S3.PublicEndpoint)
 	}
 
+	putCfg := awsCfg
+	if cfg.S3.PutAccessKey != "" {
+		putCfg.Credentials = credentials.NewStaticCredentialsProvider(
+			cfg.S3.PutAccessKey, cfg.S3.PutSecretKey, "",
+		)
+	}
+	putPublicClient := newClient(putCfg, cfg.S3.PublicEndpoint)
+
 	store := &S3Store{
-		client:    client,
-		presigner: s3.NewPresignClient(publicClient),
-		bucket:    cfg.S3.Bucket,
-		logger:    logger,
+		client:       client,
+		presigner:    s3.NewPresignClient(publicClient),
+		putPresigner: s3.NewPresignClient(putPublicClient),
+		bucket:       cfg.S3.Bucket,
+		logger:       logger,
 	}
 
 	if err := store.ensureBucket(ctx, cfg.S3.AutoCreate); err != nil {
@@ -160,6 +172,23 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error {
+	input := &s3.CopyObjectInput{
+		Bucket:            aws.String(s.bucket),
+		Key:               aws.String(dstKey),
+		CopySource:        aws.String(url.PathEscape(s.bucket + "/" + srcKey)),
+		MetadataDirective: types.MetadataDirectiveReplace,
+		ContentType:       aws.String(contentType),
+	}
+	if contentDisposition != "" {
+		input.ContentDisposition = aws.String(contentDisposition)
+	}
+	if _, err := s.client.CopyObject(ctx, input); err != nil {
+		return fmt.Errorf("copy object: %w", err)
+	}
+	return nil
+}
+
 func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(ttl)
 	input := &s3.PutObjectInput{
@@ -170,7 +199,7 @@ func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDispo
 	if contentDisposition != "" {
 		input.ContentDisposition = aws.String(contentDisposition)
 	}
-	presigned, err := s.presigner.PresignPutObject(ctx, input, s3.WithPresignExpires(ttl))
+	presigned, err := s.putPresigner.PresignPutObject(ctx, input, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("presign upload object: %w", err)
 	}

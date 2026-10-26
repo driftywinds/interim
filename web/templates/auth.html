@@ -6,8 +6,11 @@
         {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
         <form method="post" action="/setup">
             <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+            <label for="setup_token">Setup token</label>
+            <input type="password" id="setup_token" name="setup_token" autocomplete="off" required autofocus>
+            <p class="field-hint">Read the one-time token from <code>DATA_DIR/setup_token</code>, or use the value configured in <code>SETUP_TOKEN</code>.</p>
             <label for="username">Admin username</label>
-            <input type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]{3,32}" autofocus>
+            <input type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]{3,32}">
             <p class="field-hint">3–32 characters: letters, numbers, dots, underscores, or dashes.</p>
             <label for="password">Password</label>
             <input type="password" id="password" name="password" autocomplete="new-password" required minlength="10" maxlength="72">

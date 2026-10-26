@@ -4,6 +4,10 @@ This is the small-file route. Cloudflare caps proxied request bodies at about
 100 MB. If the home machine is behind restrictive NAT/CGNAT and you want files
 larger than that, use the [Tailscale-only route](tailscale-sss3.md) instead.
 
+Upgrade note: completion now performs a server-side `CopyObject` from a staging
+key to an unexposed live key. `S3_ENDPOINT` must reach sss3 directly, not
+through the public Caddy listener, because that listener blocks `CopyObject`.
+
 ## Checked-in sss3 stack
 
 For an sss3-only deployment, the repository includes:
@@ -28,6 +32,8 @@ Caddy:
 - answers `OPTIONS` with `204` and the CORS headers;
 - allows the exact `INTERIM_ORIGIN` (the interim web origin);
 - exposes `ETag`, `Content-Length`, and `Content-Disposition`;
+- rejects `X-Amz-Copy-Source` and `X-Amz-Copy-Source-Range`, preventing a
+  presigned PUT from switching into `CopyObject` or `UploadPartCopy`;
 - forwards all other requests to sss3 while preserving the public `Host`
   header that SigV4 signs.
 
@@ -48,19 +54,21 @@ If cloudflared runs as a container on the same Docker network, use
 `service: http://sss3-cors:8080` instead. The explicit public
 `httpHostHeader` is important; a rewritten `Host` breaks SigV4.
 
-The interim service should use:
+The interim service should use a direct/internal endpoint for server-side calls
+and the public Caddy hostname only for browser presigned URLs:
 
 ```dotenv
-S3_ENDPOINT=https://sss3.drifty.win
+S3_ENDPOINT=http://stupid-simple-s3:5553
 S3_PUBLIC_ENDPOINT=https://sss3.drifty.win
 S3_REGION=us-east-1
 S3_BUCKET=interim
 S3_FORCE_PATH_STYLE=true
 ```
 
-If interim is placed on the same Docker network as this stack, it can use
-`S3_ENDPOINT=http://stupid-simple-s3:5553` for server-side calls while keeping
-`S3_PUBLIC_ENDPOINT=https://sss3.drifty.win` for browser presigned URLs.
+`S3_ENDPOINT` must not point at the public Caddy listener: that listener blocks
+`CopyObject`, which completion needs for the staging-to-live copy. Put interim
+on the same Docker network as this stack, or otherwise give it a direct/private
+route to sss3. Keep `S3_PUBLIC_ENDPOINT` on the public Caddy hostname.
 
 ## Cloudflare constraints
 
@@ -89,14 +97,25 @@ matter for this deployment:
   head failure.
 - Add a Cache Rule bypass for the S3 hostname.
 - Rotate the sss3 credentials before deployment.
+- Pin the sss3 image by digest in production, for example with `SSS3_IMAGE`.
+- The checked-in [Caddyfile.sss3](../Caddyfile.sss3) blocks the headers that can
+  turn a presigned PUT into `CopyObject` or `UploadPartCopy`. Keep that block on
+  every public sss3 proxy.
 
 ## Example CORS listener
 
 An alternative Caddy listener to put in front of sss3 (Cloudflare Tunnel points
-at this listener; Caddy preserves the original `Host` header for SigV4):
+at this listener; Caddy preserves the original `Host` header for SigV4). The
+copy-operation matchers must come before the `handle` blocks:
 
 ```caddyfile
 :8080 {
+    @copyop header X-Amz-Copy-Source *
+    respond @copyop "CopyObject is not allowed on the public endpoint" 403
+
+    @copyrange header X-Amz-Copy-Source-Range *
+    respond @copyrange "CopyPart is not allowed on the public endpoint" 403
+
     @options method OPTIONS
     handle @options {
         header Access-Control-Allow-Origin "https://interim.example.com"
@@ -108,13 +127,15 @@ at this listener; Caddy preserves the original `Host` header for SigV4):
     handle {
         header Access-Control-Allow-Origin "https://interim.example.com"
         header Access-Control-Expose-Headers "ETag, Content-Length, Content-Disposition"
-        reverse_proxy stupid-simple-s3:5553
+        reverse_proxy stupid-simple-s3:5553 {
+            header_up Host {http.request.hostport}
+        }
     }
 }
 ```
 
-Set both `S3_ENDPOINT` and `S3_PUBLIC_ENDPOINT` to the public Caddy hostname
-(for example `https://sss3.drifty.win`), keep `S3_FORCE_PATH_STYLE=true`, use
-region `us-east-1`, and use a dedicated bucket. Cloudflare cannot raise its
-request-body limit, so large-file support requires a non-proxied endpoint or a
-different upload design.
+Set `S3_PUBLIC_ENDPOINT` to the public Caddy hostname (for example
+`https://sss3.drifty.win`) and keep `S3_ENDPOINT` on a direct/private sss3
+address. Keep `S3_FORCE_PATH_STYLE=true`, use region `us-east-1`, and use a
+dedicated bucket. Cloudflare cannot raise its request-body limit, so large-file
+support requires a non-proxied endpoint or a different upload design.

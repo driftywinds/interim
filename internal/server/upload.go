@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,17 +110,21 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	objectKey := s.cfg.S3.Prefix + uploadID
+	objectKey := s.cfg.S3.Prefix + "uploads/" + uploadID
 	intentExpires := now.Add(s.cfg.UploadIntentTTL)
-	reservationExpires := intentExpires.Add(time.Hour)
-	reserved, err := s.store.ReserveStorage(r.Context(), uploadID, request.Size, s.cfg.MaxStorage, now, reservationExpires)
+	reserved, err := s.store.ReserveStorage(r.Context(), uploadID, request.Size, s.reservationOwner(key, ip), store.ReservationLimits{
+		TotalBytes:    s.cfg.MaxStorage,
+		TotalFiles:    s.cfg.MaxFiles,
+		ClientBytes:   s.cfg.MaxReservedBytesPerClient,
+		ClientPending: s.cfg.MaxPendingUploadsPerClient,
+	}, now, intentExpires)
 	if err != nil {
 		s.logger.Error("reserve upload storage", "error", err)
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not reserve storage.")
 		return
 	}
 	if !reserved {
-		s.writeAPIError(w, r, http.StatusInsufficientStorage, "storage_full", "Storage maxed out — please try again later.")
+		s.writeAPIError(w, r, http.StatusInsufficientStorage, "storage_full", "Storage maxed out or too many pending uploads — please try again later.")
 		return
 	}
 
@@ -230,10 +237,34 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	liveKey, err := s.newLiveObjectKey()
+	if err != nil {
+		s.logger.Error("generate live object key", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not finalize the uploaded file.")
+		return
+	}
+	if err := s.objects.Copy(
+		r.Context(),
+		intent.ObjectKey,
+		liveKey,
+		intent.ContentType,
+		objects.AttachmentDisposition(intent.OriginalName),
+	); err != nil {
+		// Another completion may have committed the intent while this one was
+		// copying. Return the committed file instead of failing the retry.
+		if committed, ok := s.committedFile(r.Context(), intent.ID); ok {
+			s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(committed)})
+			return
+		}
+		s.logger.Error("copy uploaded object", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not finalize the uploaded object. Retry completion.")
+		return
+	}
+
 	completedAt := s.now().UTC()
 	file := store.File{
 		ID:              intent.ID,
-		ObjectKey:       intent.ObjectKey,
+		ObjectKey:       liveKey,
 		APIKeyID:        intent.APIKeyID,
 		OriginalName:    intent.OriginalName,
 		ContentType:     intent.ContentType,
@@ -243,18 +274,21 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:       completedAt.Add(s.cfg.Retention),
 	}
 	if err := s.store.CommitUploadIntent(r.Context(), intent.ID, file, completedAt); err != nil {
+		// A commit error can be ambiguous on an embedded database. If the row
+		// is present, keep the live object and return it instead of deleting it.
+		if committed, ok := s.committedFile(r.Context(), intent.ID); ok {
+			if committed.ObjectKey != liveKey {
+				s.deleteObjectBestEffort(liveKey, "delete duplicate live object")
+			}
+			s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(committed)})
+			return
+		}
+		s.deleteObjectBestEffort(liveKey, "delete uncommitted live object")
 		switch {
 		case errors.Is(err, store.ErrUploadIntentState):
-			reloaded, loadErr := s.store.UploadIntentByID(r.Context(), intent.ID)
-			if loadErr == nil && reloaded.State == "committed" && reloaded.FileID != nil {
-				if committed, fileErr := s.store.FileByID(r.Context(), *reloaded.FileID); fileErr == nil {
-					s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: reloaded.ID, File: s.fileDTO(committed)})
-					return
-				}
-			}
 			s.writeAPIError(w, r, http.StatusConflict, "upload_closed", "The upload is no longer pending.")
 		case errors.Is(err, store.ErrReservationMissing):
-			s.deleteObjectDetached(intent.ObjectKey)
+			s.deleteObjectBestEffort(intent.ObjectKey, "delete staging object after missing reservation")
 			_ = s.store.CloseUploadIntent(context.Background(), intent.ID, "failed", s.now())
 			s.logger.Warn("upload reservation missing at completion", "upload_id", intent.ID)
 			s.writeAPIError(w, r, http.StatusGone, "upload_expired", "The upload reservation is no longer valid.")
@@ -265,7 +299,45 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.deleteObjectBestEffort(intent.ObjectKey, "delete staging object after commit")
 	s.writeJSON(w, http.StatusCreated, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(file)})
+}
+
+func (s *Server) newLiveObjectKey() (string, error) {
+	token, err := randomToken(16)
+	if err != nil {
+		return "", err
+	}
+	return s.cfg.S3.Prefix + "objects/" + token, nil
+}
+
+func (s *Server) committedFile(ctx context.Context, intentID string) (store.File, bool) {
+	reloaded, err := s.store.UploadIntentByID(ctx, intentID)
+	if err != nil || reloaded.State != "committed" || reloaded.FileID == nil {
+		return store.File{}, false
+	}
+	file, err := s.store.FileByID(ctx, *reloaded.FileID)
+	if err != nil {
+		return store.File{}, false
+	}
+	return file, true
+}
+
+func (s *Server) deleteObjectBestEffort(key, reason string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.objects.Delete(ctx, key); err != nil {
+		s.logger.Warn(reason, "key", key, "error", err)
+	}
+}
+
+func (s *Server) reservationOwner(key *store.APIKey, ip string) string {
+	if key != nil {
+		return "key:" + key.ID
+	}
+	mac := hmac.New(sha256.New, s.cfg.SessionSecret)
+	_, _ = mac.Write([]byte(ip))
+	return "ip:" + hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
 func (s *Server) handleAbortUpload(w http.ResponseWriter, r *http.Request) {

@@ -299,7 +299,7 @@ paths:
       tags: [Files]
       operationId: deleteFile
       summary: Delete a committed file
-      description: Requires either the owning user hash or the one-time per-file delete token returned by the upload intent.
+      description: Requires either the owning user hash or the per-file delete token returned by the upload intent.
       parameters:
         - $ref: "#/components/parameters/FileID"
         - name: X-Delete-Token
@@ -460,7 +460,7 @@ components:
           description: Deadline for completion.
         upload_token:
           type: string
-          description: One-time token for complete/abort; never put it in a URL.
+          description: Bearer token for complete/abort until the intent expires; never put it in a URL.
         complete_url:
           type: string
           format: uri

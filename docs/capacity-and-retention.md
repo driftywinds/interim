@@ -17,6 +17,18 @@ When a cap is set and committed storage plus reservations reaches `MAX_STORAGE`:
 - the home page disables upload controls and shows
   **“Storage maxed out — please try again later.”**
 
+`MAX_FILES` is a separate global cap on committed files plus active pending
+intents (default 100000; set `0` to disable). It limits the metadata and
+deep-sweep working set even when many tiny files would fit within
+`MAX_STORAGE`.
+
+Pending intents are also limited per owner (an authenticated key ID or an HMAC
+of the client IP): `MAX_PENDING_UPLOADS_PER_CLIENT` defaults to 2 and
+`MAX_RESERVED_BYTES_PER_CLIENT` defaults to `MAX_FILE_SIZE`. Set either to `0`
+to disable that check. A single client therefore cannot reserve the entire
+global quota with a handful of unauthenticated intents, though a distributed
+attacker is still a WAF/rate-limit concern.
+
 `RETENTION` is read from the environment when the process starts. Each committed
 file gets an expiry of `completed_at + RETENTION`; changing the value applies to
 new uploads, not existing rows. Expired file pages return HTTP `410`,
@@ -26,13 +38,23 @@ before removing the SQLite row.
 ## Upload intents and the janitor
 
 Every direct upload creates an `upload_intents` row with state `pending`. The
-browser gets a presigned PUT URL and a one-time upload token. Completion performs
-`HeadObject`, verifies the size, consumes the reservation, and inserts the file
-row in one SQLite transaction.
+browser gets a presigned PUT URL for a staging key and a bearer upload token
+valid until the intent expires; it can be replayed for completion or abort.
+Completion performs `HeadObject` on the staging object, verifies the size, and
+then uses server-side `CopyObject` to a separate live key under
+`<S3_OBJECT_PREFIX>objects/<random>`. Metadata is replaced during the copy, the
+reservation is consumed, and the file row is inserted with the live key in one
+SQLite transaction. The staging key is deleted afterward on a best-effort basis;
+the janitor removes leftovers.
+
+The presigned URL never names the live key, so a client cannot overwrite a
+committed file even while the PUT URL is still valid. This keeps `MAX_STORAGE`
+and the recorded file size meaningful after completion. If no live copy is
+committed, the janitor removes leftovers.
 
 When `PUBLIC_UPLOADS_ENABLED=false`, creating the intent also requires an
-admin-approved user hash. Completion and abort still use only the one-time
-upload token, so a slow upload is not stranded by a later approval change.
+admin-approved user hash. Completion and abort still use only the upload token,
+so a slow upload is not stranded by a later approval change.
 
 Abandoned or failed uploads are cleaned by a janitor:
 
@@ -56,9 +78,10 @@ existing file instead of duplicating it.
 
 Because a presigned PUT cannot enforce a content-length condition at the storage
 layer, a client can temporarily upload more than it declared. Completion checks
-the real object size and deletes anything that exceeds the declared size or
-`MAX_FILE_SIZE`. Keep `UPLOAD_URL_TTL` short and use a bucket lifecycle rule if
-temporary cost exposure is a concern.
+the staging object's real size and deletes anything that exceeds the declared
+size or `MAX_FILE_SIZE`. After commit, only the untouched live copy is served.
+Keep `UPLOAD_URL_TTL` short and use a bucket lifecycle rule if temporary staging
+cost exposure is a concern.
 
 For extra safety, configure a bucket lifecycle rule for the configured prefix.
 The application does not require it, but it limits cost if the server is offline

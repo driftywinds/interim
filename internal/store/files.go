@@ -40,34 +40,33 @@ func scanFile(scanner rowScanner) (File, error) {
 }
 
 // ReserveStorage atomically reserves capacity. A single INSERT ... SELECT keeps
-// concurrent uploads from overshooting the configured maximum. A non-positive
-// limit disables the global cap and reserves unconditionally.
-func (s *Store) ReserveStorage(ctx context.Context, id string, bytes, limit int64, now, expiresAt time.Time) (bool, error) {
-	if limit <= 0 {
-		result, err := s.db.ExecContext(ctx,
-			`INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
-			 VALUES (?, ?, ?, ?)`,
-			id, bytes, toUnix(now), toUnix(expiresAt),
-		)
-		if err != nil {
-			return false, fmt.Errorf("reserve storage: %w", err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return false, fmt.Errorf("reserve storage rows: %w", err)
-		}
-		return affected == 1, nil
-	}
-
+// concurrent uploads from overshooting the configured global or per-client
+// limits. Non-positive limits disable the corresponding check.
+func (s *Store) ReserveStorage(ctx context.Context, id string, bytes int64, owner string, limits ReservationLimits, now, expiresAt time.Time) (bool, error) {
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO storage_reservations (id, bytes, created_at, expires_at)
-		 SELECT ?, ?, ?, ?
-		 WHERE (
+		`INSERT INTO storage_reservations (id, bytes, owner, created_at, expires_at)
+		 SELECT ?, ?, ?, ?, ?
+		 WHERE (? <= 0 OR (
 		     COALESCE((SELECT SUM(size) FROM files), 0) +
 		     COALESCE((SELECT SUM(bytes) FROM storage_reservations WHERE expires_at > ?), 0) +
 		     ?
-		 ) <= ?`,
-		id, bytes, toUnix(now), toUnix(expiresAt), toUnix(now), bytes, limit,
+		 ) <= ?)
+		 AND (? <= 0 OR (
+		     COALESCE((SELECT SUM(bytes) FROM storage_reservations WHERE owner = ? AND expires_at > ?), 0) +
+		     ?
+		 ) <= ?)
+		 AND (? <= 0 OR (
+		     SELECT COUNT(*) FROM storage_reservations WHERE owner = ? AND expires_at > ?
+		 ) < ?)
+		 AND (? <= 0 OR (
+		     (SELECT COUNT(*) FROM files) +
+		     (SELECT COUNT(*) FROM storage_reservations WHERE expires_at > ?)
+		 ) < ?)`,
+		id, bytes, owner, toUnix(now), toUnix(expiresAt),
+		limits.TotalBytes, toUnix(now), bytes, limits.TotalBytes,
+		limits.ClientBytes, owner, toUnix(now), bytes, limits.ClientBytes,
+		limits.ClientPending, owner, toUnix(now), limits.ClientPending,
+		limits.TotalFiles, toUnix(now), limits.TotalFiles,
 	)
 	if err != nil {
 		return false, fmt.Errorf("reserve storage: %w", err)

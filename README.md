@@ -26,8 +26,10 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8080` (or your public URL), then visit `/admin` to create
-the admin account. The setup page is only available while no admin exists.
+Open `http://localhost:8080/setup`, then use the one-time token from
+`docker exec interim cat /data/setup_token` (or your configured `SETUP_TOKEN`)
+to create the admin account. The setup page is only available while no admin
+exists.
 
 The SQLite database, session secret, and WAL files live in the `interim-data`
 volume at `/data`. Back up the volume, not individual files while the

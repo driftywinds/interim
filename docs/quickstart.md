@@ -11,8 +11,17 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8080` (or your public URL), then visit `/admin` to create
-the admin account. The setup page is only available while no admin exists.
+The Compose file binds the Go listener to `127.0.0.1:8080`; put Caddy,
+cloudflared, or another trusted proxy in front of it for public access. Open
+`http://localhost:8080/setup` and enter the one-time setup token:
+
+```sh
+docker exec interim cat /data/setup_token
+```
+
+Alternatively set `SETUP_TOKEN` in `.env` before starting. The setup page is
+only available while no admin exists, and the generated token file is deleted
+after successful setup.
 
 The SQLite database, generated session secret, and WAL files live in the
 `interim-data` volume at `/data`. Back up the volume, not individual files
