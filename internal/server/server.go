@@ -44,16 +44,17 @@ var (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *store.Store
-	objects   objects.Store
-	logger    *slog.Logger
-	templates map[string]*template.Template
-	static    http.Handler
-	downloads *download.Signer
-	limiter   *rateLimiter
-	dummyHash []byte
-	now       func() time.Time
+	cfg          config.Config
+	store        *store.Store
+	objects      objects.Store
+	logger       *slog.Logger
+	templates    map[string]*template.Template
+	static       http.Handler
+	assetVersion string
+	downloads    *download.Signer
+	limiter      *rateLimiter
+	dummyHash    []byte
+	now          func() time.Time
 
 	keyFlashMu sync.Mutex
 	keyFlashes map[string]adminKeyFlash
@@ -83,16 +84,17 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		store:      st,
-		objects:    obj,
-		logger:     logger,
-		templates:  templates,
-		static:     http.FileServerFS(staticFS),
-		downloads:  downloads,
-		limiter:    newRateLimiter(),
-		now:        time.Now,
-		keyFlashes: make(map[string]adminKeyFlash),
+		cfg:          cfg,
+		store:        st,
+		objects:      obj,
+		logger:       logger,
+		templates:    templates,
+		static:       http.FileServerFS(staticFS),
+		assetVersion: staticAssetVersion(),
+		downloads:    downloads,
+		limiter:      newRateLimiter(),
+		now:          time.Now,
+		keyFlashes:   make(map[string]adminKeyFlash),
 	}
 	dummy, err := bcrypt.GenerateFromPassword([]byte("interim-dummy-password"), 12)
 	if err != nil {
@@ -100,6 +102,18 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 	}
 	s.dummyHash = dummy
 	return s, nil
+}
+
+func staticAssetVersion() string {
+	h := sha256.New()
+	for _, name := range []string{"static/app.js", "static/app.css", "static/favicon.svg"} {
+		data, err := webassets.FS.ReadFile(name)
+		if err != nil {
+			continue
+		}
+		_, _ = h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 func (s *Server) Handler() http.Handler {
@@ -181,6 +195,7 @@ func (s *Server) basePage(r *http.Request, title, active string) PageData {
 		MaxStorage:     s.cfg.MaxStorage,
 		DownloadTTL:    s.cfg.DownloadTTL,
 		CurrentPath:    r.URL.Path,
+		AssetVersion:   s.assetVersion,
 	}
 }
 

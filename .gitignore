@@ -38,6 +38,9 @@ coverage.out
 coverage.html
 *.test
 
+# Local verification scripts and transcripts
+/scripts/
+
 # Local development / research artifacts
 /.research/
 /.gocache/

@@ -22,6 +22,7 @@ type PageData struct {
 	MaxStorage     int64
 	DownloadTTL    time.Duration
 	CurrentPath    string
+	AssetVersion   string
 }
 
 type StatusView struct {

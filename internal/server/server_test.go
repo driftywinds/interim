@@ -586,6 +586,17 @@ func TestDownloadURLUsesConfiguredWorkers(t *testing.T) {
 	}
 }
 
+func TestStaticAssetsAreVersioned(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body := getBody(t, env.client, env.http.URL+"/")
+	if status != http.StatusOK {
+		t.Fatalf("home status = %d", status)
+	}
+	if !bytes.Contains([]byte(body), []byte(`/static/app.js?v=`)) || !bytes.Contains([]byte(body), []byte(`/static/app.css?v=`)) {
+		t.Fatalf("home did not reference versioned static assets: %s", body)
+	}
+}
+
 func TestPublicPagesAndAdminSetup(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
 

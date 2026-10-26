@@ -7,9 +7,9 @@
     <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Temporary file hosting. Every file is deleted after {{.RetentionLabel}}.{{end}}">
     <meta name="application-name" content="interim">
     {{if .NoIndex}}<meta name="robots" content="noindex,nofollow">{{end}}
-    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/static/app.css">
-    <script src="/static/app.js" defer></script>
+    <link rel="icon" href="/static/favicon.svg?v={{.AssetVersion}}" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/app.css?v={{.AssetVersion}}">
+    <script src="/static/app.js?v={{.AssetVersion}}" defer></script>
 </head>
 <body data-page="{{.Active}}">
 <header class="site-head">
