@@ -37,19 +37,20 @@ const (
 )
 
 type Config struct {
-	PublicBaseURL     string
-	ListenAddr        string
-	DataDir           string
-	DatabasePath      string
-	SessionSecret     []byte
-	SessionTTL        time.Duration
-	AdminIdleTimeout  time.Duration
-	CookieSecure      bool
-	TrustProxy        bool
-	TrustedProxyCIDRs []netip.Prefix
-	SetupToken        string
-	SetupTokenPath    string
-	LogLevel          string
+	PublicBaseURL         string
+	ListenAddr            string
+	DataDir               string
+	DatabasePath          string
+	SessionSecret         []byte
+	SessionTTL            time.Duration
+	AdminIdleTimeout      time.Duration
+	CookieSecure          bool
+	TrustProxy            bool
+	TrustedProxyCIDRs     []netip.Prefix
+	TrustedClientIPHeader string
+	SetupToken            string
+	SetupTokenPath        string
+	LogLevel              string
 
 	Retention                  time.Duration
 	MaxStorage                 int64
@@ -260,6 +261,13 @@ func Load() (Config, error) {
 	if trustProxy && len(trustedProxyCIDRs) == 0 {
 		return Config{}, errors.New("TRUSTED_PROXY_CIDRS is required when TRUST_PROXY=true")
 	}
+	trustedClientIPHeader, err := parseTrustedClientIPHeader(os.Getenv("TRUSTED_CLIENT_IP_HEADER"))
+	if err != nil {
+		return Config{}, err
+	}
+	if trustedClientIPHeader != "" && !trustProxy {
+		return Config{}, errors.New("TRUSTED_CLIENT_IP_HEADER requires TRUST_PROXY=true")
+	}
 
 	publicUploadsEnabled, err := parseBool("PUBLIC_UPLOADS_ENABLED", true)
 	if err != nil {
@@ -305,6 +313,7 @@ func Load() (Config, error) {
 		CookieSecure:               cookieSecure,
 		TrustProxy:                 trustProxy,
 		TrustedProxyCIDRs:          trustedProxyCIDRs,
+		TrustedClientIPHeader:      trustedClientIPHeader,
 		SetupToken:                 setupToken,
 		SetupTokenPath:             setupTokenPath,
 		LogLevel:                   logLevel,
@@ -590,6 +599,20 @@ func parseOptionalByteLimit(name, fallback string) (int64, error) {
 	value, err := units.ParseBytes(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return value, nil
+}
+
+func parseTrustedClientIPHeader(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return "", errors.New("TRUSTED_CLIENT_IP_HEADER must be a valid HTTP header name")
 	}
 	return value, nil
 }

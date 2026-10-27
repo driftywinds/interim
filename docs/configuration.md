@@ -15,6 +15,7 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `COOKIE_SECURE` | no | `auto` | `auto` follows the scheme of `PUBLIC_BASE_URL`. `__Host-` cookie names are used when secure. |
 | `TRUST_PROXY` | no | `false` | Trust forwarded headers from peers in `TRUSTED_PROXY_CIDRS`. |
 | `TRUSTED_PROXY_CIDRS` | with `TRUST_PROXY` | — | Comma/space-separated proxy CIDRs or IPs. Required and validated when `TRUST_PROXY=true`. |
+| `TRUSTED_CLIENT_IP_HEADER` | no | — | Optional header carrying the real client IP (for example `CF-Connecting-IP`). Only read when the peer is in `TRUSTED_PROXY_CIDRS`; requires `TRUST_PROXY=true`. |
 | `ADMIN_SESSION_TTL` | no | `12h` | Absolute session lifetime, 15m–168h. |
 | `ADMIN_IDLE_TIMEOUT` | no | `2h` | Revoke an admin session after this much inactivity, 5m–168h. |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error`. |

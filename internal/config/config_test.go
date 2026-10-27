@@ -161,6 +161,25 @@ func TestTrustedProxyConfig(t *testing.T) {
 	}
 }
 
+func TestTrustedClientIPHeader(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("TRUST_PROXY", "true")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+	t.Setenv("TRUSTED_CLIENT_IP_HEADER", "CF-Connecting-IP")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedClientIPHeader != "CF-Connecting-IP" {
+		t.Fatalf("trusted client header = %q", cfg.TrustedClientIPHeader)
+	}
+
+	t.Setenv("TRUST_PROXY", "false")
+	if _, err := Load(); err == nil {
+		t.Fatal("trusted client header should require TRUST_PROXY=true")
+	}
+}
+
 func TestMultipartRequiresUploadIdentity(t *testing.T) {
 	withBaseEnv(t)
 	t.Setenv("MULTIPART_UPLOAD_ENABLED", "true")

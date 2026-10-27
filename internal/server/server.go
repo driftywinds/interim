@@ -504,6 +504,18 @@ func (s *Server) clientIP(r *http.Request) string {
 		return clientNetwork(remoteAddr)
 	}
 
+	// Some proxies (notably Cloudflare via Charon/Caddy) pass the real client
+	// in a dedicated header and overwrite X-Forwarded-For with their own peer
+	// address. Only consult this header after the remote peer has passed the
+	// trusted-proxy check, so a direct client cannot spoof it.
+	if header := s.cfg.TrustedClientIPHeader; header != "" {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			if addr, err := netip.ParseAddr(value); err == nil {
+				return clientNetwork(addr.Unmap())
+			}
+		}
+	}
+
 	var chain []string
 	for _, header := range r.Header.Values("X-Forwarded-For") {
 		for _, part := range strings.Split(header, ",") {

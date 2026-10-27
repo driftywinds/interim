@@ -11,6 +11,10 @@
   If you leave `TRUST_PROXY=false` behind Caddy/cloudflared, every request
   appears to come from the proxy: per-IP login, upload, key-creation and download
   limits become global, and one failed-login burst can lock out the admin.
+- If your frontend/proxy overwrites `X-Forwarded-For` with its own address but
+  preserves `CF-Connecting-IP` (Charon does this), set
+  `TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP` alongside `TRUST_PROXY=true` and
+  `TRUSTED_PROXY_CIDRS`. The header is only read from a trusted proxy peer.
 - Keep the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`) private. The file
   is removed after the first admin is created. Generate real values with
   `openssl rand -base64 48`; the loader rejects the `.env.example` placeholder

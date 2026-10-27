@@ -1189,6 +1189,28 @@ func TestClientIPTrustedProxyChain(t *testing.T) {
 	}
 }
 
+func TestClientIPTrustedHeader(t *testing.T) {
+	s := &Server{cfg: config.Config{
+		TrustProxy:            true,
+		TrustedProxyCIDRs:     []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+		TrustedClientIPHeader: "CF-Connecting-IP",
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("CF-Connecting-IP", "203.0.113.9")
+	request.Header.Set("X-Forwarded-For", "104.22.48.201")
+	if got := s.clientIP(request); got != "203.0.113.9" {
+		t.Fatalf("trusted client header = %q", got)
+	}
+
+	direct := httptest.NewRequest(http.MethodGet, "/", nil)
+	direct.RemoteAddr = "198.51.100.7:1234"
+	direct.Header.Set("CF-Connecting-IP", "203.0.113.10")
+	if got := s.clientIP(direct); got != "198.51.100.7" {
+		t.Fatalf("untrusted client header spoof = %q", got)
+	}
+}
+
 func TestRateLimiterMapIsBounded(t *testing.T) {
 	limiter := newRateLimiter()
 	now := time.Now()

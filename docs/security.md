@@ -61,6 +61,12 @@
   X-Forwarded-For chain is read from right to left. `X-Real-IP` is never used as
   a fallback. IPv6 clients are collapsed to their /64 for rate-limit and quota
   keys, so rotating within a /64 does not reset the counters.
+- When `TRUSTED_CLIENT_IP_HEADER` is set, that header is used only after the
+  connecting peer matches `TRUSTED_PROXY_CIDRS`, then the value must parse as an
+  IP. This covers proxies such as Charon/Caddy that overwrite
+  `X-Forwarded-For` with their own peer address but pass
+  `CF-Connecting-IP` unchanged. Do not set it to a client-supplied header on an
+  origin that is reachable without the trusted proxy.
 - Access logs hash/remove file and upload IDs, and failed-login logs omit the
   attempted username. `/healthz` only reveals database/storage detail to a
   loopback caller.
