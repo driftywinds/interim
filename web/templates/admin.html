@@ -70,7 +70,7 @@
                         <td>{{bytes .Size}}</td>
                         <td>{{if .KeyPrefix}}<code>{{maskPrefix .KeyPrefix}}</code>{{else}}<span class="muted">anonymous</span>{{end}}</td>
                         <td>{{date .CreatedAt}}</td>
-                        <td>{{if .ExpiresAt.Before $.Now}}<span class="text-danger">expired</span>{{else}}{{datetime .ExpiresAt}}{{end}}</td>
+                        <td>{{if never .ExpiresAt}}<span class="muted">never</span>{{else if .ExpiresAt.Before $.Now}}<span class="text-danger">expired</span>{{else}}{{datetime .ExpiresAt}}{{end}}</td>
                         <td>
                             <div class="row-actions">
                                 <a href="/f/{{.ID}}" target="_blank" rel="noopener">Open</a>
@@ -123,8 +123,13 @@
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         <label for="key-name">New user hash</label>
         <input type="text" id="key-name" name="name" maxlength="64" placeholder="Label (optional)">
+        <label for="key-max-size">Max file size</label>
+        <input type="text" id="key-max-size" name="max_file_size" value="{{.DefaultMaxFileSize}}" maxlength="32" placeholder="0 = unlimited">
+        <label for="key-retention">Retention</label>
+        <input type="text" id="key-retention" name="retention" value="{{.DefaultRetention}}" maxlength="32" placeholder="0 = unlimited">
         <button type="submit">Generate user hash</button>
     </form>
+    <p class="muted">Max file size accepts sizes like <code>500MB</code> or <code>2GB</code>. Retention accepts <code>7d</code>, <code>12h</code>, or <code>0</code> for unlimited. Both default to the instance values; <code>0</code> removes the per-hash limit.</p>
 
     {{if .NewKey}}
     <div class="key-reveal" role="status">
@@ -135,12 +140,26 @@
 
     <div class="table-wrap">
         <table class="fs admin-table">
-            <thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th>Files</th><th>Bytes</th><th>Status</th><th>Upload access</th><th></th></tr></thead>
+            <thead><tr><th>Prefix</th><th>Label</th><th>Limits</th><th>Created</th><th>Last used</th><th>Files</th><th>Bytes</th><th>Status</th><th>Upload access</th><th></th></tr></thead>
             <tbody>
             {{range .Keys}}
                 <tr>
                     <td><code>{{.Prefix}}…</code></td>
                     <td>{{if .Name}}{{.Name}}{{else}}<span class="muted">—</span>{{end}}</td>
+                    <td>
+                        <details class="key-limits">
+                            <summary>{{.FileLimitLabel}} · {{.RetentionLimitLabel}}</summary>
+                            <form method="post" action="/admin/keys/update" class="search-form">
+                                <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+                                <input type="hidden" name="id" value="{{.ID}}">
+                                <input type="hidden" name="action" value="limits">
+                                <label>Max file size <input type="text" name="max_file_size" value="{{.MaxFileSizeInput}}" maxlength="32" size="8"></label>
+                                <label>Retention <input type="text" name="retention" value="{{.RetentionInput}}" maxlength="32" size="8"></label>
+                                <button type="submit">Save limits</button>
+                                <span class="muted">0 = unlimited</span>
+                            </form>
+                        </details>
+                    </td>
                     <td>{{date .CreatedAt}}</td>
                     <td>{{if .LastUsedAt}}{{datetime .LastUsedAt}}{{else}}<span class="muted">never</span>{{end}}</td>
                     <td>{{.FileCount}}</td>
@@ -165,7 +184,7 @@
                     </td>
                 </tr>
             {{else}}
-                <tr><td colspan="9" class="muted">No user hashes have been created.</td></tr>
+                <tr><td colspan="10" class="muted">No user hashes have been created.</td></tr>
             {{end}}
             </tbody>
         </table>

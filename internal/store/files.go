@@ -14,7 +14,7 @@ var (
 )
 
 const fileColumns = `f.id, f.object_key, f.api_key_id, f.original_name, f.content_type,
-	f.size, f.delete_token_hash, f.created_at, f.expires_at, f.deleting_at`
+	f.size, f.delete_token_hash, f.created_at, f.expires_at, f.retention_seconds, f.deleting_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -24,10 +24,10 @@ func scanFile(scanner rowScanner) (File, error) {
 	var file File
 	var apiKeyID sql.NullString
 	var created, expires int64
-	var deleting sql.NullInt64
+	var retention, deleting sql.NullInt64
 	err := scanner.Scan(
 		&file.ID, &file.ObjectKey, &apiKeyID, &file.OriginalName, &file.ContentType,
-		&file.Size, &file.DeleteTokenHash, &created, &expires, &deleting,
+		&file.Size, &file.DeleteTokenHash, &created, &expires, &retention, &deleting,
 	)
 	if err != nil {
 		return File{}, err
@@ -37,6 +37,10 @@ func scanFile(scanner rowScanner) (File, error) {
 	}
 	file.CreatedAt = scanTime(created)
 	file.ExpiresAt = scanTime(expires)
+	if retention.Valid {
+		value := retention.Int64
+		file.RetentionSeconds = &value
+	}
 	file.DeletingAt = nullableUnix(deleting)
 	return file, nil
 }
@@ -277,11 +281,11 @@ func (s *Store) ListFilesAdmin(ctx context.Context, filter FileFilter) ([]AdminF
 		var adminFile AdminFile
 		var apiKeyID sql.NullString
 		var created, expires int64
-		var deleting sql.NullInt64
+		var retention, deleting sql.NullInt64
 		if err := rows.Scan(
 			&adminFile.ID, &adminFile.ObjectKey, &apiKeyID, &adminFile.OriginalName,
 			&adminFile.ContentType, &adminFile.Size, &adminFile.DeleteTokenHash,
-			&created, &expires, &deleting, &adminFile.KeyPrefix, &adminFile.KeyName,
+			&created, &expires, &retention, &deleting, &adminFile.KeyPrefix, &adminFile.KeyName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan admin file: %w", err)
 		}
@@ -290,6 +294,10 @@ func (s *Store) ListFilesAdmin(ctx context.Context, filter FileFilter) ([]AdminF
 		}
 		adminFile.CreatedAt = scanTime(created)
 		adminFile.ExpiresAt = scanTime(expires)
+		if retention.Valid {
+			value := retention.Int64
+			adminFile.RetentionSeconds = &value
+		}
 		adminFile.DeletingAt = nullableUnix(deleting)
 		files = append(files, adminFile)
 	}

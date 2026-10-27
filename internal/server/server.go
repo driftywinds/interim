@@ -39,6 +39,15 @@ const (
 	keyFlashCookie = "interim_key_flash"
 )
 
+// neverExpires is the stored deadline for a file whose owner has unlimited
+// retention. Keeping a concrete far-future timestamp avoids changing every
+// expiry comparison, query, and API field to handle a nullable deadline.
+var neverExpires = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
+func neverExpiresAt(t time.Time) bool {
+	return !t.Before(neverExpires)
+}
+
 var (
 	errUnauthorized = errors.New("unauthorized")
 )
@@ -217,16 +226,12 @@ func (s *Server) cookieName(base string) string {
 }
 
 func (s *Server) basePage(r *http.Request, title, active string) PageData {
-	rule := "after " + retentionLabel(s.cfg.Retention)
-	if s.cfg.ExtendRetentionOnDownload {
-		rule = retentionLabel(s.cfg.Retention) + " after the last download"
-	}
 	return PageData{
 		Title:                     title,
 		Active:                    active,
 		BaseURL:                   s.cfg.PublicBaseURL,
 		RetentionLabel:            retentionLabel(s.cfg.Retention),
-		RetentionRule:             rule,
+		RetentionRule:             s.retentionRule(s.cfg.Retention),
 		ExtendRetentionOnDownload: s.cfg.ExtendRetentionOnDownload,
 		MaxFileSize:               s.cfg.MaxFileSize,
 		MaxStorage:                s.cfg.MaxStorage,
@@ -236,15 +241,48 @@ func (s *Server) basePage(r *http.Request, title, active string) PageData {
 	}
 }
 
+func (s *Server) retentionRule(retention time.Duration) string {
+	if retention <= 0 {
+		return "never"
+	}
+	if s.cfg.ExtendRetentionOnDownload {
+		return retentionLabel(retention) + " after the last download"
+	}
+	return "after " + retentionLabel(retention)
+}
+
+func (s *Server) fileRetention(file store.File) time.Duration {
+	if file.RetentionSeconds != nil {
+		return time.Duration(*file.RetentionSeconds) * time.Second
+	}
+	return s.cfg.Retention
+}
+
 // retainOnDownload refreshes a live file's expiry when interim issues a
 // download link. Downloads go straight from the browser to storage, so this is
 // the last point where interim can observe the download.
 func (s *Server) retainOnDownload(ctx context.Context, file store.File) store.File {
-	if !s.cfg.ExtendRetentionOnDownload || s.cfg.Retention <= 0 {
+	if !s.cfg.ExtendRetentionOnDownload {
+		return file
+	}
+	retention := s.fileRetention(file)
+	if retention <= 0 {
+		if neverExpiresAt(file.ExpiresAt) {
+			return file
+		}
+		now := s.now().UTC().Truncate(time.Second)
+		extended, err := s.store.ExtendFileExpiry(ctx, file.ID, now, neverExpires)
+		if err != nil {
+			s.logger.Error("extend file retention on download", "file_id", file.ID, "error", err)
+			return file
+		}
+		if extended {
+			file.ExpiresAt = neverExpires
+		}
 		return file
 	}
 	now := s.now().UTC().Truncate(time.Second)
-	expiresAt := now.Add(s.cfg.Retention)
+	expiresAt := now.Add(retention)
 	extended, err := s.store.ExtendFileExpiry(ctx, file.ID, now, expiresAt)
 	if err != nil {
 		s.logger.Error("extend file retention on download", "file_id", file.ID, "error", err)
@@ -254,6 +292,41 @@ func (s *Server) retainOnDownload(ctx context.Context, file store.File) store.Fi
 		file.ExpiresAt = expiresAt
 	}
 	return file
+}
+
+// keyLimits resolves a user hash's per-file limits. A nil key (anonymous
+// upload) follows the instance defaults. -1 on a stored key also means
+// "inherit"; 0 means unlimited; positive values are the limit.
+func (s *Server) keyLimits(key *store.APIKey) (maxFileSize int64, retention time.Duration) {
+	maxFileSize = s.cfg.MaxFileSize
+	retention = s.cfg.Retention
+	if key == nil {
+		return maxFileSize, retention
+	}
+	if key.MaxFileSize >= 0 {
+		maxFileSize = key.MaxFileSize
+	}
+	if key.RetentionSeconds >= 0 {
+		retention = time.Duration(key.RetentionSeconds) * time.Second
+	}
+	return maxFileSize, retention
+}
+
+func (s *Server) keyLimitsForID(ctx context.Context, keyID *string) (int64, time.Duration, error) {
+	if keyID == nil {
+		maxFileSize, retention := s.keyLimits(nil)
+		return maxFileSize, retention, nil
+	}
+	key, err := s.store.APIKeyByID(ctx, *keyID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			maxFileSize, retention := s.keyLimits(nil)
+			return maxFileSize, retention, nil
+		}
+		return 0, 0, err
+	}
+	maxFileSize, retention := s.keyLimits(&key)
+	return maxFileSize, retention, nil
 }
 
 func (s *Server) downloadURL(ctx context.Context, file store.File) (string, time.Time, error) {
@@ -359,6 +432,9 @@ func loadTemplates() (map[string]*template.Template, error) {
 			return fmt.Sprintf("%.1f", v)
 		},
 		"duration": humanDuration,
+		"never": func(t time.Time) bool {
+			return neverExpiresAt(t)
+		},
 		"maskPrefix": func(s string) string {
 			if s == "" {
 				return "anonymous"
@@ -448,6 +524,9 @@ func durationPart(value int, unit string) string {
 }
 
 func expiresIn(t time.Time) string {
+	if neverExpiresAt(t) {
+		return "never"
+	}
 	remaining := time.Until(t)
 	if remaining <= 0 {
 		return "expired"

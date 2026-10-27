@@ -26,37 +26,42 @@ type apiErrorDetail struct {
 }
 
 type fileDTO struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Size        int64     `json:"size"`
-	ContentType string    `json:"content_type"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	ExpiresIn   int64     `json:"expires_in_seconds"`
-	PageURL     string    `json:"page_url"`
-	APIURL      string    `json:"api_url"`
-	Owner       string    `json:"owner"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Size         int64     `json:"size"`
+	ContentType  string    `json:"content_type"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	ExpiresIn    int64     `json:"expires_in_seconds"`
+	NeverExpires bool      `json:"never_expires"`
+	PageURL      string    `json:"page_url"`
+	APIURL       string    `json:"api_url"`
+	Owner        string    `json:"owner"`
 }
 
 type keyDTO struct {
-	ID        string    `json:"id"`
-	UserHash  string    `json:"user_hash"`
-	Prefix    string    `json:"key_prefix"`
-	Name      string    `json:"name,omitempty"`
-	Approved  bool      `json:"approved"`
-	CreatedAt time.Time `json:"created_at"`
-	Warning   string    `json:"warning"`
+	ID               string    `json:"id"`
+	UserHash         string    `json:"user_hash"`
+	Prefix           string    `json:"key_prefix"`
+	Name             string    `json:"name,omitempty"`
+	Approved         bool      `json:"approved"`
+	CreatedAt        time.Time `json:"created_at"`
+	MaxFileSizeBytes int64     `json:"max_file_size_bytes"`
+	RetentionSeconds int64     `json:"retention_seconds"`
+	Warning          string    `json:"warning"`
 }
 
 type keyInfoDTO struct {
-	ID         string     `json:"id"`
-	KeyPrefix  string     `json:"key_prefix"`
-	Name       string     `json:"name,omitempty"`
-	Approved   bool       `json:"approved"`
-	CreatedAt  time.Time  `json:"created_at"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	Files      int64      `json:"files"`
-	Bytes      int64      `json:"bytes"`
+	ID               string     `json:"id"`
+	KeyPrefix        string     `json:"key_prefix"`
+	Name             string     `json:"name,omitempty"`
+	Approved         bool       `json:"approved"`
+	CreatedAt        time.Time  `json:"created_at"`
+	LastUsedAt       *time.Time `json:"last_used_at,omitempty"`
+	Files            int64      `json:"files"`
+	Bytes            int64      `json:"bytes"`
+	MaxFileSizeBytes int64      `json:"max_file_size_bytes"`
+	RetentionSeconds int64      `json:"retention_seconds"`
 }
 
 type storageDTO struct {
@@ -209,27 +214,30 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	name := cleanLabel(request.Name)
-	key, rawHash, err := s.newUserHash(r.Context(), name, false)
+	maxFileSize, retention := s.keyLimits(nil)
+	key, rawHash, err := s.newUserHash(r.Context(), name, false, maxFileSize, int64(retention/time.Second))
 	if err != nil {
 		s.logger.Error("create api key", "error", err)
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not create a user hash.")
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, keyDTO{
-		ID:        key.ID,
-		UserHash:  rawHash,
-		Prefix:    key.Prefix,
-		Name:      key.Name,
-		Approved:  key.Approved,
-		CreatedAt: key.CreatedAt,
-		Warning:   "Save this user hash now. It is shown once and cannot be recovered.",
+		ID:               key.ID,
+		UserHash:         rawHash,
+		Prefix:           key.Prefix,
+		Name:             key.Name,
+		Approved:         key.Approved,
+		CreatedAt:        key.CreatedAt,
+		MaxFileSizeBytes: key.MaxFileSize,
+		RetentionSeconds: key.RetentionSeconds,
+		Warning:          "Save this user hash now. It is shown once and cannot be recovered.",
 	})
 }
 
 // newUserHash creates and persists a bearer credential. Admin-created hashes
 // start approved; self-service hashes stay unapproved so enabling the upload
 // allowlist cannot silently authorize credentials created earlier.
-func (s *Server) newUserHash(ctx context.Context, name string, approved bool) (store.APIKey, string, error) {
+func (s *Server) newUserHash(ctx context.Context, name string, approved bool, maxFileSize, retentionSeconds int64) (store.APIKey, string, error) {
 	rawHash, err := randomToken(32)
 	if err != nil {
 		return store.APIKey{}, "", err
@@ -240,12 +248,14 @@ func (s *Server) newUserHash(ctx context.Context, name string, approved bool) (s
 		return store.APIKey{}, "", err
 	}
 	key := store.APIKey{
-		ID:        id,
-		KeyHash:   tokenHash(rawHash),
-		Prefix:    rawHash[:min(16, len(rawHash))],
-		Name:      name,
-		Approved:  approved,
-		CreatedAt: s.now().UTC(),
+		ID:               id,
+		KeyHash:          tokenHash(rawHash),
+		Prefix:           rawHash[:min(16, len(rawHash))],
+		Name:             name,
+		Approved:         approved,
+		CreatedAt:        s.now().UTC(),
+		MaxFileSize:      maxFileSize,
+		RetentionSeconds: retentionSeconds,
 	}
 	if err := s.store.CreateAPIKey(ctx, key); err != nil {
 		return store.APIKey{}, "", err
@@ -264,15 +274,18 @@ func (s *Server) handleKeyInfo(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not read user hash usage.")
 		return
 	}
+	maxFileSize, retention := s.keyLimits(key)
 	s.writeJSON(w, http.StatusOK, keyInfoDTO{
-		ID:         key.ID,
-		KeyPrefix:  key.Prefix,
-		Name:       key.Name,
-		Approved:   key.Approved,
-		CreatedAt:  key.CreatedAt,
-		LastUsedAt: key.LastUsedAt,
-		Files:      usage.Files,
-		Bytes:      usage.Bytes,
+		ID:               key.ID,
+		KeyPrefix:        key.Prefix,
+		Name:             key.Name,
+		Approved:         key.Approved,
+		CreatedAt:        key.CreatedAt,
+		LastUsedAt:       key.LastUsedAt,
+		Files:            usage.Files,
+		Bytes:            usage.Bytes,
+		MaxFileSizeBytes: maxFileSize,
+		RetentionSeconds: int64(retention / time.Second),
 	})
 }
 
@@ -343,20 +356,24 @@ func (s *Server) fileDTO(file store.File) fileDTO {
 		owner = "user_hash"
 	}
 	expiresIn := int64(file.ExpiresAt.Sub(s.now()).Seconds())
-	if expiresIn < 0 {
+	neverExpires := neverExpiresAt(file.ExpiresAt)
+	if neverExpires {
+		expiresIn = 0
+	} else if expiresIn < 0 {
 		expiresIn = 0
 	}
 	return fileDTO{
-		ID:          file.ID,
-		Name:        file.OriginalName,
-		Size:        file.Size,
-		ContentType: file.ContentType,
-		CreatedAt:   file.CreatedAt,
-		ExpiresAt:   file.ExpiresAt,
-		ExpiresIn:   expiresIn,
-		PageURL:     s.pageURL(file.ID),
-		APIURL:      s.apiFileURL(file.ID),
-		Owner:       owner,
+		ID:           file.ID,
+		Name:         file.OriginalName,
+		Size:         file.Size,
+		ContentType:  file.ContentType,
+		CreatedAt:    file.CreatedAt,
+		ExpiresAt:    file.ExpiresAt,
+		ExpiresIn:    expiresIn,
+		NeverExpires: neverExpires,
+		PageURL:      s.pageURL(file.ID),
+		APIURL:       s.apiFileURL(file.ID),
+		Owner:        owner,
 	}
 }
 

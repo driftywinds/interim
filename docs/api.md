@@ -77,7 +77,7 @@ reload.
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/keys` | no | Create user hash. Disabled when public uploads are off. |
-| `GET` | `/api/v1/keys/me` | bearer | Key prefix, approval, and usage. |
+| `GET` | `/api/v1/keys/me` | bearer | Key prefix, approval, usage, and per-hash limits. |
 | `POST` | `/api/v1/uploads` | optional; approved when restricted | Reserve quota and create single-PUT or multipart upload state. |
 | `GET` | `/api/v1/uploads/{id}` | upload token | Multipart status and completed part numbers. |
 | `POST` | `/api/v1/uploads/{id}/parts` | upload token | Request up to 100 presigned part URLs. |
@@ -91,7 +91,10 @@ reload.
 | `GET` | `/api/v1/status` | no | Capacity and retention status. |
 
 `GET /api/v1/status` also reports `retention_extend_on_download`, so clients can
-tell whether each download-link request slides the file expiry.
+tell whether each download-link request slides the file expiry. `GET
+/api/v1/keys/me` returns the caller's effective `max_file_size_bytes` and
+`retention_seconds`; `0` means unlimited for that hash. File objects include
+`never_expires: true` when the uploader's hash has unlimited retention.
 
 Rate limits apply to user-hash creation, upload-intent creation, download-link
 creation, and admin login. Errors use

@@ -32,19 +32,44 @@ multiply the reservation cap, though a distributed attacker is still a
 WAF/rate-limit concern.
 
 `RETENTION` is read from the environment when the process starts. Each committed
-file gets an expiry of `completed_at + RETENTION`; changing the value applies to
-new uploads, not existing rows. Expired file pages return HTTP `410`,
-metadata/download endpoints refuse them, and a worker claims the SQLite row,
-deletes the S3 object, then removes the row. A failed object delete releases the
-claim so the next janitor pass retries.
+file gets an expiry of `completed_at + RETENTION` unless its uploader's user
+hash has an override; changing the instance value applies to new uploads, not
+existing rows. Expired file pages return HTTP `410`, metadata/download endpoints
+refuse them, and a worker claims the SQLite row, deletes the S3 object, then
+removes the row. A failed object delete releases the claim so the next janitor
+pass retries.
+
+### Per-hash limits
+
+Admin-created user hashes can carry a per-file maximum and a retention override.
+Both are edited in `/admin` under **User hashes**:
+
+- `max_file_size`: defaults to `MAX_FILE_SIZE`; `0` means unlimited for that
+  hash. A per-hash grant can exceed the instance default, but the provider's
+  single-PUT or multipart object limit and `MAX_STORAGE` still apply.
+- `retention`: defaults to `RETENTION`; `0` means files uploaded with that hash
+  never expire. Positive values are captured into `files.retention_seconds` when
+  the upload commits, so later edits do not rewrite existing files.
+
+Anonymous uploads use the instance defaults. Self-service hashes created through
+the public API are created with the current instance defaults and do not change
+when the instance settings change. Hashes that predate this feature have no
+stored override and inherit the current instance values. The per-hash file-size
+limit is checked both when the upload intent is created and when it completes.
+
+An unlimited-retention file is stored with a far-future expiry sentinel. It
+still counts toward `MAX_STORAGE` and `MAX_FILES`, and the admin can delete it
+manually. Sliding retention uses the per-file snapshot; a file from a hash with
+`retention=0` is never extended or expired.
 
 ### Sliding retention from the last download
 
 Set `RETENTION_EXTEND_ON_DOWNLOAD=true` to make retention relative to the last
 download instead of upload time. Every successful `GET /f/{id}/download` or
-`POST /api/v1/files/{id}/download` moves `expires_at` to `now + RETENTION`.
-There is no separate download record; the new expiry is the last-download
-timestamp. Existing files keep their current expiry until their next download.
+`POST /api/v1/files/{id}/download` moves `expires_at` to `now + RETENTION`, or to
+the uploader hash's per-file retention snapshot when one exists. There is no
+separate download record; the new expiry is the last-download timestamp.
+Existing files keep their current expiry until their next download.
 
 Downloads go directly from the browser to storage, so interim never sees the
 bytes arrive. The extension is triggered when interim issues the signed link,

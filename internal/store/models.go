@@ -30,8 +30,12 @@ type APIKey struct {
 	LastUsedAt *time.Time
 	Disabled   bool
 	Approved   bool
-	FileCount  int64
-	FileBytes  int64
+	// MaxFileSize and RetentionSeconds are per-hash overrides. -1 inherits the
+	// instance default; 0 means unlimited; a positive value is the limit.
+	MaxFileSize      int64
+	RetentionSeconds int64
+	FileCount        int64
+	FileBytes        int64
 }
 
 type File struct {
@@ -44,7 +48,10 @@ type File struct {
 	DeleteTokenHash []byte
 	CreatedAt       time.Time
 	ExpiresAt       time.Time
-	DeletingAt      *time.Time
+	// RetentionSeconds is the per-file retention captured at upload. Nil means
+	// the file predates per-key retention and follows the instance default.
+	RetentionSeconds *int64
+	DeletingAt       *time.Time
 }
 
 type AdminFile struct {

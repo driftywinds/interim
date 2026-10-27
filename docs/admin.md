@@ -8,8 +8,16 @@ requires the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`). The admin can:
 - open files, delete one file, or select and bulk-delete (S3 object first);
 - generate an approved user hash for someone and show it once;
 - inspect user-hash prefixes, approval, usage, and last-used time;
+- set a per-hash file-size limit and retention override;
 - approve/unapprove uploads and revoke/restore authentication without exposing
   the raw hash.
+
+Per-hash limits default to the instance `MAX_FILE_SIZE` and `RETENTION`. Set
+either to `0` for unlimited: a hash with `max_file_size=0` may exceed the
+instance file-size default (up to the provider limit), and a hash with
+`retention=0` gets files that never expire. The retention value is captured when
+each upload commits, so later edits apply to new files only. Hashes that predate
+this feature inherit the instance defaults until edited.
 
 Admin POSTs are CSRF-protected. Login is rate-limited per IP and per account;
 password minimum is 12 characters. Passwords are bcrypt hashes (cost 12).

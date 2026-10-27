@@ -2,7 +2,8 @@
 <p class="lede">{{if .Status.PublicUploads}}interim is a fast, minimal temporary file host. Upload anonymously or use the API{{else}}interim is a fast, minimal temporary file host. Uploads are limited to approved user hashes.{{end}}</p>
 
 <div class="expiry-notice" role="note">
-    <strong>Every file is permanently deleted {{.RetentionRule}}.</strong>
+    <strong>Every file is permanently deleted {{.RetentionRule}} by default.</strong>
+    <p class="muted">Admin-issued user hashes can have custom file-size and retention limits.</p>
     <p class="storage-donate">
         {{if .Status.Unlimited}}Want to support development?{{else}}Want to support development and increase this limit?{{end}}
         <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
@@ -112,7 +113,7 @@
     <h2>Our main features include</h2>
     <ul>
         <li>{{if .Status.PublicUploads}}No account needed{{else}}Uploads limited to approved user hashes{{end}}</li>
-        <li>Expiry period of {{.RetentionLabel}}{{if .ExtendRetentionOnDownload}} from the last download{{end}}</li>
+        <li>Expiry period of {{.RetentionLabel}}{{if .ExtendRetentionOnDownload}} from the last download{{end}} by default</li>
         <li>{{if .Status.Unlimited}}No global storage cap{{else}}A strict storage cap (Please donate if you want more storage and retention time){{end}}</li>
         <li>Basic upload history and deletion</li>
     </ul>

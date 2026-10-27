@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER,
     disabled     INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
-    approved     INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))
+    approved     INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1)),
+    max_file_size     INTEGER NOT NULL DEFAULT -1,
+    retention_seconds INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS files (
     delete_token_hash BLOB NOT NULL,
     created_at        INTEGER NOT NULL,
     expires_at        INTEGER NOT NULL,
+    retention_seconds INTEGER,
     deleting_at       INTEGER
 );
 

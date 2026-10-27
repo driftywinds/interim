@@ -769,7 +769,7 @@ input[type="radio"] {
 }
 
 .admin-table {
-    min-width: 52rem;
+    min-width: 60rem;
 }
 
 .admin-table td {
@@ -782,6 +782,19 @@ input[type="radio"] {
 
 .expired-row {
     opacity: 0.65;
+}
+
+.key-limits summary {
+    font-size: 90%;
+    white-space: nowrap;
+}
+
+.key-limits .search-form {
+    margin: 8px 0 0;
+}
+
+.key-limits input {
+    width: 7rem;
 }
 
 .pagination {

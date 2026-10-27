@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 7"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -98,6 +98,18 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := ensureColumn(ctx, db, "files", "deleting_at",
 		`ALTER TABLE files ADD COLUMN deleting_at INTEGER`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "files", "retention_seconds",
+		`ALTER TABLE files ADD COLUMN retention_seconds INTEGER`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "api_keys", "max_file_size",
+		`ALTER TABLE api_keys ADD COLUMN max_file_size INTEGER NOT NULL DEFAULT -1`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "api_keys", "retention_seconds",
+		`ALTER TABLE api_keys ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT -1`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx,

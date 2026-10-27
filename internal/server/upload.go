@@ -114,13 +114,18 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The file size must be greater than zero.")
 		return
 	}
-	if request.Size > s.cfg.MaxFileSize {
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The file exceeds the %s per-file limit.", units.FormatBytes(s.cfg.MaxFileSize)))
+	maxFileSize, _ := s.keyLimits(key)
+	if maxFileSize > 0 && request.Size > maxFileSize {
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("The file exceeds the %s per-file limit for this user hash.", units.FormatBytes(maxFileSize)))
 		return
 	}
 	multipart := s.cfg.MultipartEnabled && request.Size > s.cfg.MultipartThreshold
 	if !multipart && request.Size > config.MaxSinglePutSize {
 		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "Direct uploads support at most 5 GB per file.")
+		return
+	}
+	if multipart && request.Size > config.MaxMultipartObjectSize {
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("Multipart uploads support at most %s per file.", units.FormatBytes(config.MaxMultipartObjectSize)))
 		return
 	}
 	contentType := objects.SanitizeContentType(request.ContentType)
@@ -155,10 +160,21 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 
 	objectKey := s.cfg.S3.Prefix + "uploads/" + uploadID
 	intentExpires := now.Add(s.cfg.UploadIntentTTL)
+	// A per-hash file-size grant must also fit the per-client reservation cap.
+	// Unlimited (-0) on the key disables that client cap; MAX_STORAGE still
+	// bounds the total.
+	clientBytes := s.cfg.MaxReservedBytesPerClient
+	if key != nil {
+		if maxFileSize == 0 {
+			clientBytes = 0
+		} else if maxFileSize > clientBytes {
+			clientBytes = maxFileSize
+		}
+	}
 	reserved, err := s.store.ReserveStorage(r.Context(), uploadID, request.Size, s.reservationOwner(key, ip), store.ReservationLimits{
 		TotalBytes:    s.cfg.MaxStorage,
 		TotalFiles:    s.cfg.MaxFiles,
-		ClientBytes:   s.cfg.MaxReservedBytesPerClient,
+		ClientBytes:   clientBytes,
 		ClientPending: s.cfg.MaxPendingUploadsPerClient,
 	}, now, intentExpires)
 	if err != nil {
@@ -429,6 +445,12 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not verify the uploaded object.")
 		return
 	}
+	maxFileSize, retention, err := s.keyLimitsForID(r.Context(), intent.APIKeyID)
+	if err != nil {
+		s.logger.Error("read user hash limits", "upload_id", intent.ID, "error", err)
+		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not read the user hash limits.")
+		return
+	}
 
 	switch {
 	case info.Size <= 0:
@@ -439,9 +461,9 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.failUploadIntent(r.Context(), intent, "Uploaded object size does not match the declared size.")
 		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_size_mismatch", "The uploaded object size does not match the declared size.")
 		return
-	case info.Size > s.cfg.MaxFileSize:
-		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds per-file cap.")
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The uploaded object exceeds the per-file limit.")
+	case maxFileSize > 0 && info.Size > maxFileSize:
+		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds the user hash per-file cap.")
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The uploaded object exceeds the per-file limit for this user hash.")
 		return
 	}
 
@@ -479,16 +501,22 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	completedAt := s.now().UTC()
+	retentionSeconds := int64(retention / time.Second)
+	expiresAt := neverExpires
+	if retention > 0 {
+		expiresAt = completedAt.Add(time.Duration(retentionSeconds) * time.Second)
+	}
 	file := store.File{
-		ID:              intent.ID,
-		ObjectKey:       liveKey,
-		APIKeyID:        intent.APIKeyID,
-		OriginalName:    intent.OriginalName,
-		ContentType:     intent.ContentType,
-		Size:            info.Size,
-		DeleteTokenHash: intent.DeleteTokenHash,
-		CreatedAt:       completedAt,
-		ExpiresAt:       completedAt.Add(s.cfg.Retention),
+		ID:               intent.ID,
+		ObjectKey:        liveKey,
+		APIKeyID:         intent.APIKeyID,
+		OriginalName:     intent.OriginalName,
+		ContentType:      intent.ContentType,
+		Size:             info.Size,
+		DeleteTokenHash:  intent.DeleteTokenHash,
+		CreatedAt:        completedAt,
+		ExpiresAt:        expiresAt,
+		RetentionSeconds: &retentionSeconds,
 	}
 	if err := s.store.CommitUploadIntent(r.Context(), intent.ID, file, completedAt); err != nil {
 		// A commit error can be ambiguous on an embedded database. If the row

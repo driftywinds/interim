@@ -48,17 +48,19 @@ type HomeView struct {
 
 type FilePageView struct {
 	PageData
-	ID          string
-	Name        string
-	Size        int64
-	ContentType string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
-	ExpiresUnix int64
-	ExpiresIn   string
-	PageURL     string
-	DownloadTTL string
-	IsExpired   bool
+	ID                string
+	Name              string
+	Size              int64
+	ContentType       string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	ExpiresUnix       int64
+	ExpiresIn         string
+	NeverExpires      bool
+	FileRetentionRule string
+	PageURL           string
+	DownloadTTL       string
+	IsExpired         bool
 }
 
 type APIDocsView struct {
@@ -75,25 +77,35 @@ type APIDocsView struct {
 	UploadURLTTL     string
 }
 
+type AdminKeyView struct {
+	store.APIKey
+	FileLimitLabel      string
+	MaxFileSizeInput    string
+	RetentionLimitLabel string
+	RetentionInput      string
+}
+
 type AdminView struct {
 	PageData
-	Usage         store.Usage
-	Percent       float64
-	Unlimited     bool
-	Files         []store.AdminFile
-	Keys          []store.APIKey
-	Total         int64
-	Page          int
-	Pages         int
-	Query         string
-	PrevURL       string
-	NextURL       string
-	Deleted       int
-	Failed        int
-	Now           time.Time
-	PublicUploads bool
-	NewKey        string
-	NewKeyName    string
+	Usage              store.Usage
+	Percent            float64
+	Unlimited          bool
+	Files              []store.AdminFile
+	Keys               []AdminKeyView
+	Total              int64
+	Page               int
+	Pages              int
+	Query              string
+	PrevURL            string
+	NextURL            string
+	Deleted            int
+	Failed             int
+	Now                time.Time
+	PublicUploads      bool
+	NewKey             string
+	NewKeyName         string
+	DefaultMaxFileSize string
+	DefaultRetention   string
 }
 
 type AuthView struct {

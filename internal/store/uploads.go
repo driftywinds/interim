@@ -212,10 +212,10 @@ func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file Fi
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO files
-		 (id, object_key, api_key_id, original_name, content_type, size, delete_token_hash, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (id, object_key, api_key_id, original_name, content_type, size, delete_token_hash, created_at, expires_at, retention_seconds)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		file.ID, file.ObjectKey, file.APIKeyID, file.OriginalName, file.ContentType,
-		file.Size, file.DeleteTokenHash, toUnix(file.CreatedAt), toUnix(file.ExpiresAt),
+		file.Size, file.DeleteTokenHash, toUnix(file.CreatedAt), toUnix(file.ExpiresAt), file.RetentionSeconds,
 	)
 	if err != nil {
 		return fmt.Errorf("insert uploaded file: %w", err)

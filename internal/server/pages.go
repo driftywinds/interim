@@ -42,20 +42,29 @@ func (s *Server) handleFilePage(w http.ResponseWriter, r *http.Request) {
 
 	expired := !file.ExpiresAt.After(s.now())
 	page := s.basePage(r, file.OriginalName, "")
-	page.Description = fmt.Sprintf("Download %s from interim. Available for %s.", file.OriginalName, page.RetentionLabel)
+	retention := s.fileRetention(file)
+	page.RetentionLabel = retentionLabel(retention)
+	if retention <= 0 {
+		page.RetentionLabel = "never"
+		page.Description = fmt.Sprintf("Download %s from interim. This file does not expire.", file.OriginalName)
+	} else {
+		page.Description = fmt.Sprintf("Download %s from interim. Available for %s.", file.OriginalName, page.RetentionLabel)
+	}
 	view := FilePageView{
-		PageData:    page,
-		ID:          file.ID,
-		Name:        file.OriginalName,
-		Size:        file.Size,
-		ContentType: file.ContentType,
-		CreatedAt:   file.CreatedAt,
-		ExpiresAt:   file.ExpiresAt,
-		ExpiresUnix: file.ExpiresAt.Unix(),
-		ExpiresIn:   expiresIn(file.ExpiresAt),
-		PageURL:     s.pageURL(file.ID),
-		DownloadTTL: humanDuration(s.cfg.DownloadTTL),
-		IsExpired:   expired,
+		PageData:          page,
+		ID:                file.ID,
+		Name:              file.OriginalName,
+		Size:              file.Size,
+		ContentType:       file.ContentType,
+		CreatedAt:         file.CreatedAt,
+		ExpiresAt:         file.ExpiresAt,
+		ExpiresUnix:       file.ExpiresAt.Unix(),
+		ExpiresIn:         expiresIn(file.ExpiresAt),
+		NeverExpires:      neverExpiresAt(file.ExpiresAt),
+		FileRetentionRule: s.retentionRule(retention),
+		PageURL:           s.pageURL(file.ID),
+		DownloadTTL:       humanDuration(s.cfg.DownloadTTL),
+		IsExpired:         expired,
 	}
 	status := http.StatusOK
 	if expired {

@@ -19,7 +19,7 @@ Docker as the primary deployment target.
   browser sessions for large files.
 - Private bucket downloads with expiring signed or Worker-proxied URLs.
 - Configurable retention, optionally extended on every download, plus per-file
-  limits and total storage caps.
+  limits, per-hash overrides, and total storage caps.
 - First-run admin setup, file management, and a background janitor.
 
 ## Quick start

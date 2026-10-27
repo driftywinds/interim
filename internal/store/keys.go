@@ -10,9 +10,11 @@ import (
 
 func (s *Store) CreateAPIKey(ctx context.Context, key APIKey) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at, disabled, approved)
-		 VALUES (?, ?, ?, ?, ?, 0, ?)`,
+		`INSERT INTO api_keys
+		 (id, key_hash, key_prefix, name, created_at, disabled, approved, max_file_size, retention_seconds)
+		 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
 		key.ID, key.KeyHash, key.Prefix, key.Name, toUnix(key.CreatedAt), boolInt(key.Approved),
+		key.MaxFileSize, key.RetentionSeconds,
 	)
 	if err != nil {
 		return fmt.Errorf("create api key: %w", err)
@@ -26,10 +28,12 @@ func (s *Store) APIKeyByHash(ctx context.Context, hash []byte) (APIKey, error) {
 	var lastUsed sql.NullInt64
 	var disabled, approved int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved,
+		        max_file_size, retention_seconds
 		 FROM api_keys WHERE key_hash = ?`,
 		hash,
-	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved)
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved,
+		&key.MaxFileSize, &key.RetentionSeconds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -49,10 +53,12 @@ func (s *Store) APIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var lastUsed sql.NullInt64
 	var disabled, approved int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved
+		`SELECT id, key_hash, key_prefix, name, created_at, last_used_at, disabled, approved,
+		        max_file_size, retention_seconds
 		 FROM api_keys WHERE id = ?`,
 		id,
-	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved)
+	).Scan(&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved,
+		&key.MaxFileSize, &key.RetentionSeconds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -90,7 +96,7 @@ func (s *Store) APIKeyUsage(ctx context.Context, id string) (APIKeyUsage, error)
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT k.id, k.key_hash, k.key_prefix, k.name, k.created_at, k.last_used_at, k.disabled, k.approved,
-		        COUNT(f.id), COALESCE(SUM(f.size), 0)
+		        k.max_file_size, k.retention_seconds, COUNT(f.id), COALESCE(SUM(f.size), 0)
 		 FROM api_keys k
 		 LEFT JOIN files f ON f.api_key_id = k.id
 		 GROUP BY k.id
@@ -109,7 +115,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		var disabled, approved int
 		if err := rows.Scan(
 			&key.ID, &key.KeyHash, &key.Prefix, &key.Name, &created, &lastUsed, &disabled, &approved,
-			&key.FileCount, &key.FileBytes,
+			&key.MaxFileSize, &key.RetentionSeconds, &key.FileCount, &key.FileBytes,
 		); err != nil {
 			return nil, fmt.Errorf("scan api key: %w", err)
 		}
@@ -123,6 +129,24 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		return nil, fmt.Errorf("iterate api keys: %w", err)
 	}
 	return keys, nil
+}
+
+func (s *Store) SetAPIKeyLimits(ctx context.Context, id string, maxFileSize, retentionSeconds int64) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE api_keys SET max_file_size = ?, retention_seconds = ? WHERE id = ?",
+		maxFileSize, retentionSeconds, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update api key limits: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update api key limits rows: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) SetAPIKeyDisabled(ctx context.Context, id string, disabled bool) error {

@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"interim/internal/config"
 	"interim/internal/store"
+	"interim/internal/units"
 )
 
 const (
@@ -67,6 +69,17 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Admin unavailable", "Could not list user hashes.")
 		return
 	}
+	keyViews := make([]AdminKeyView, 0, len(keys))
+	for _, key := range keys {
+		maxFileSize, retention := s.keyLimits(&key)
+		keyViews = append(keyViews, AdminKeyView{
+			APIKey:              key,
+			FileLimitLabel:      fileLimitLabel(maxFileSize),
+			MaxFileSizeInput:    fileLimitInput(maxFileSize),
+			RetentionLimitLabel: retentionLimitLabel(retention),
+			RetentionInput:      retentionLimitInput(retention),
+		})
+	}
 
 	pages := int((total + adminPageSize - 1) / adminPageSize)
 	if pages < 1 {
@@ -94,20 +107,22 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	page.NoIndex = true
 
 	view := AdminView{
-		PageData:      page,
-		Usage:         usage,
-		Percent:       percent,
-		Unlimited:     s.cfg.MaxStorage == 0,
-		Files:         files,
-		Keys:          keys,
-		Total:         total,
-		Page:          pageNumber,
-		Pages:         pages,
-		Query:         query,
-		PrevURL:       prevURL,
-		NextURL:       nextURL,
-		Now:           s.now(),
-		PublicUploads: s.cfg.PublicUploadsEnabled,
+		PageData:           page,
+		Usage:              usage,
+		Percent:            percent,
+		Unlimited:          s.cfg.MaxStorage == 0,
+		Files:              files,
+		Keys:               keyViews,
+		Total:              total,
+		Page:               pageNumber,
+		Pages:              pages,
+		Query:              query,
+		PrevURL:            prevURL,
+		NextURL:            nextURL,
+		Now:                s.now(),
+		PublicUploads:      s.cfg.PublicUploadsEnabled,
+		DefaultMaxFileSize: fileLimitInput(s.cfg.MaxFileSize),
+		DefaultRetention:   retentionLimitInput(s.cfg.Retention),
 	}
 	if hasKeyFlash {
 		view.NewKey = flash.Key
@@ -130,6 +145,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		page.Flash = "User hash approved for uploads."
 	case "unapproved":
 		page.Flash = "User hash approval removed."
+	case "limits":
+		page.Flash = "User hash limits updated."
+	case "invalid_limits":
+		page.Flash = "Those limits are invalid. Use a size like 500MB, a duration like 7d, or 0 for unlimited."
 	case "invalid":
 		page.Flash = "That user hash could not be found."
 	case "error":
@@ -226,7 +245,12 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := cleanLabel(r.PostFormValue("name"))
-	key, rawHash, err := s.newUserHash(r.Context(), name, true)
+	maxFileSize, retentionSeconds, err := s.parseAdminKeyLimits(r, s.cfg.MaxFileSize, int64(s.cfg.Retention/time.Second))
+	if err != nil {
+		s.redirectAdmin(w, r, "keys=invalid_limits")
+		return
+	}
+	key, rawHash, err := s.newUserHash(r.Context(), name, true, maxFileSize, retentionSeconds)
 	if err != nil {
 		s.logger.Error("admin create user hash", "admin", session.Username, "error", err)
 		s.redirectAdmin(w, r, "keys=error")
@@ -269,6 +293,14 @@ func (s *Server) handleAdminUpdateKey(w http.ResponseWriter, r *http.Request) {
 	case "restore":
 		err = s.store.SetAPIKeyDisabled(r.Context(), id, false)
 		flash = "restored"
+	case "limits":
+		maxFileSize, retentionSeconds, parseErr := s.parseAdminKeyLimits(r, -1, -1)
+		if parseErr != nil {
+			s.redirectAdmin(w, r, "keys=invalid_limits")
+			return
+		}
+		err = s.store.SetAPIKeyLimits(r.Context(), id, maxFileSize, retentionSeconds)
+		flash = "limits"
 	default:
 		s.redirectAdmin(w, r, "keys=invalid")
 		return
@@ -284,6 +316,93 @@ func (s *Server) handleAdminUpdateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("admin updated user hash", "admin", session.Username, "key_id", id, "action", action)
 	s.redirectAdmin(w, r, "keys="+flash)
+}
+
+func (s *Server) parseAdminKeyLimits(r *http.Request, fallbackFileSize, fallbackRetention int64) (int64, int64, error) {
+	maxFileSize, err := parseLimitFileSize(r.PostFormValue("max_file_size"), fallbackFileSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	retentionSeconds, err := parseLimitRetention(r.PostFormValue("retention"), fallbackRetention)
+	if err != nil {
+		return 0, 0, err
+	}
+	return maxFileSize, retentionSeconds, nil
+}
+
+func parseLimitFileSize(raw string, fallback int64) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	switch strings.ToLower(raw) {
+	case "0", "unlimited", "none":
+		return 0, nil
+	}
+	value, err := units.ParseBytes(raw)
+	if err != nil {
+		return 0, err
+	}
+	if value > config.MaxMultipartObjectSize {
+		return 0, fmt.Errorf("file limit cannot exceed %s", units.FormatBytes(config.MaxMultipartObjectSize))
+	}
+	return value, nil
+}
+
+func parseLimitRetention(raw string, fallback int64) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	switch strings.ToLower(raw) {
+	case "0", "unlimited", "never":
+		return 0, nil
+	}
+	retention, err := config.ParseRetention(raw)
+	if err != nil {
+		return 0, err
+	}
+	if retention < time.Hour || retention > 10*365*24*time.Hour {
+		return 0, errors.New("retention must be 0, or between 1h and 3650d")
+	}
+	return int64(retention / time.Second), nil
+}
+
+func fileLimitLabel(limit int64) string {
+	if limit <= 0 {
+		return "unlimited"
+	}
+	return units.FormatBytes(limit)
+}
+
+func fileLimitInput(limit int64) string {
+	if limit <= 0 {
+		return "0"
+	}
+	return units.FormatBytes(limit)
+}
+
+func retentionLimitLabel(retention time.Duration) string {
+	if retention <= 0 {
+		return "unlimited"
+	}
+	return retentionLabel(retention)
+}
+
+func retentionLimitInput(retention time.Duration) string {
+	if retention <= 0 {
+		return "0"
+	}
+	if retention%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(retention/(24*time.Hour)))
+	}
+	if retention%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(retention/time.Hour))
+	}
+	if retention%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(retention/time.Minute))
+	}
+	return retention.String()
 }
 
 type adminKeyFlash struct {

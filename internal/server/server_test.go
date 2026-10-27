@@ -1606,6 +1606,145 @@ func TestSlidingRetentionOnDownload(t *testing.T) {
 	})
 }
 
+func TestPerKeyFileSizeAndRetentionLimits(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.setupAdmin(t)
+	env.server.cfg.MaxFileSize = 10
+	env.server.cfg.Retention = 2 * time.Hour
+
+	status, adminBody := getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin status = %d", status)
+	}
+	csrf := extractCSRF(t, adminBody)
+	response, err := env.client.PostForm(env.http.URL+"/admin/keys/create", url.Values{
+		"csrf_token":    {csrf},
+		"name":          {"limited"},
+		"max_file_size": {"20"},
+		"retention":     {"1h"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("create limited key status = %d", response.StatusCode)
+	}
+
+	status, adminBody = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin after create = %d", status)
+	}
+	match := newKeyPattern.FindStringSubmatch(adminBody)
+	if match == nil {
+		t.Fatal("limited key was not revealed")
+	}
+	hash := match[1]
+	key, err := env.store.APIKeyByHash(context.Background(), tokenHash(hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.MaxFileSize != 20 || key.RetentionSeconds != 3600 {
+		t.Fatalf("stored key limits = %d / %d", key.MaxFileSize, key.RetentionSeconds)
+	}
+
+	under := env.upload(t, hash, "under.bin", make([]byte, 15))
+	if under.Status != http.StatusCreated {
+		t.Fatalf("under-limit upload = %d: %s", under.Status, under.Body)
+	}
+	file, err := env.store.FileByID(context.Background(), under.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.RetentionSeconds == nil || *file.RetentionSeconds != 3600 {
+		t.Fatalf("file retention = %v", file.RetentionSeconds)
+	}
+	if lifetime := file.ExpiresAt.Sub(file.CreatedAt); lifetime != time.Hour {
+		t.Fatalf("file lifetime = %v, want 1h", lifetime)
+	}
+	status, filePage := getBody(t, env.client, env.http.URL+"/f/"+under.ID)
+	if status != http.StatusOK || !bytes.Contains([]byte(filePage), []byte("deleted automatically after 1 hour")) {
+		t.Fatalf("per-key retention page = %d", status)
+	}
+
+	over := env.upload(t, hash, "over.bin", make([]byte, 21))
+	if over.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-limit upload = %d: %s", over.Status, over.Body)
+	}
+	anonymous := env.upload(t, "", "anonymous-over.bin", make([]byte, 11))
+	if anonymous.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("anonymous over instance-limit upload = %d: %s", anonymous.Status, anonymous.Body)
+	}
+
+	status, adminBody = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin before limit update = %d", status)
+	}
+	csrf = extractCSRF(t, adminBody)
+	response, err = env.client.PostForm(env.http.URL+"/admin/keys/update", url.Values{
+		"csrf_token":    {csrf},
+		"id":            {key.ID},
+		"action":        {"limits"},
+		"max_file_size": {"0"},
+		"retention":     {"0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("update limits status = %d", response.StatusCode)
+	}
+
+	unlimited := env.upload(t, hash, "unlimited.bin", make([]byte, 21))
+	if unlimited.Status != http.StatusCreated {
+		t.Fatalf("unlimited key upload = %d: %s", unlimited.Status, unlimited.Body)
+	}
+	var payload struct {
+		File struct {
+			NeverExpires bool `json:"never_expires"`
+		} `json:"file"`
+	}
+	if err := json.Unmarshal(unlimited.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.File.NeverExpires {
+		t.Fatal("upload response did not report never_expires")
+	}
+	status, filePage = getBody(t, env.client, env.http.URL+"/f/"+unlimited.ID)
+	if status != http.StatusOK || !bytes.Contains([]byte(filePage), []byte("This file does not expire")) {
+		t.Fatalf("never-expiring file page = %d", status)
+	}
+	file, err = env.store.FileByID(context.Background(), unlimited.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !neverExpiresAt(file.ExpiresAt) {
+		t.Fatalf("unlimited retention expiry = %v", file.ExpiresAt)
+	}
+	if file.RetentionSeconds == nil || *file.RetentionSeconds != 0 {
+		t.Fatalf("unlimited retention snapshot = %v", file.RetentionSeconds)
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, env.http.URL+"/api/v1/keys/me", nil)
+	request.Header.Set("Authorization", "Bearer "+hash)
+	keyResponse, err := env.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyResponse.Body.Close()
+	var info struct {
+		MaxFileSizeBytes int64 `json:"max_file_size_bytes"`
+		RetentionSeconds int64 `json:"retention_seconds"`
+	}
+	if err := json.NewDecoder(keyResponse.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.MaxFileSizeBytes != 0 || info.RetentionSeconds != 0 {
+		t.Fatalf("key info limits = %d / %d", info.MaxFileSizeBytes, info.RetentionSeconds)
+	}
+}
+
 func TestOwnershipAndStorageQuota(t *testing.T) {
 	env := newTestEnv(t, 100, 100)
 	_, hashA := env.createKey(t)

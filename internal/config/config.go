@@ -772,8 +772,12 @@ func parseStorageLimit(value string) (int64, error) {
 	return units.ParseBytes(value)
 }
 
-// parseRetention accepts standard Go durations plus day-based values such as
+// ParseRetention accepts standard Go durations plus day-based values such as
 // 7d, 30d, or 1.5d.
+func ParseRetention(value string) (time.Duration, error) {
+	return parseRetention(value)
+}
+
 func parseRetention(value string) (time.Duration, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {

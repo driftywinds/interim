@@ -38,9 +38,9 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `MULTIPART_CONCURRENCY` | no | `3` | Browser part parallelism, 1–8. |
 | `MULTIPART_SIGN_PART_LENGTH` | no | `true` | Sign the exact part Content-Length into presigned URLs. Disable only if the provider cannot verify signed Content-Length. |
 | `MAX_PENDING_UPLOADS_PER_CLIENT` | no | `2` | Pending intent cap per approved hash or per client network. `0` disables. Unapproved/self-service hashes share the per-IP bucket. |
-| `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Reserved-byte cap per approved hash or per client network. `0` disables. |
+| `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Reserved-byte cap per approved hash or per client network. `0` disables. A per-hash file-size grant can raise this for that hash. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
-| `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set. Files above 5GB require multipart uploads. |
+| `MAX_FILE_SIZE` | no | `5GB` | Default per-file cap for anonymous/self-service uploads and new hashes. An admin can override it per hash; provider limits still apply. Cannot exceed `MAX_STORAGE` when a cap is set. Files above 5GB require multipart uploads. |
 | `MAX_FILES` | no | `100000` | Global committed-file count cap. `0` disables. |
 | `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry until their next download when sliding retention is enabled. |
 | `RETENTION_EXTEND_ON_DOWNLOAD` | no | `false` | Slide retention from the last download: each download-link request moves the file expiry to `now + RETENTION`. Downloads bypass interim, so the extension is triggered when the link is issued. |
@@ -50,6 +50,22 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `DOWNLOAD_WORKER_SECRET` | worker mode yes | — | At least 32 characters; must match the worker's `DOWNLOAD_TOKEN_SECRET`. Placeholder values are rejected. |
 | `SWEEP_ON_STARTUP` | no | `false` | Delete unknown objects under `S3_OBJECT_PREFIX` at startup. Leave false unless the prefix is dedicated to this database. |
 | `MAX_CONCURRENT_COMPLETIONS` | no | `8` | Upper bound on detached upload finalizations, 1–256. |
+
+## Per-hash limits
+
+User hashes carry two optional overrides, edited in `/admin`:
+
+- **Max file size** defaults to `MAX_FILE_SIZE`; `0` means unlimited for that
+  hash. The S3 single-PUT limit (5 GB) or multipart object limit (5 TiB) and
+  `MAX_STORAGE` still apply.
+- **Retention** defaults to `RETENTION`; `0` means the hash's files never expire.
+  A positive value is captured when the upload is committed, so changing the
+  hash later does not rewrite existing files.
+
+Hashes created before this feature inherit the current instance defaults. New
+hashes are created with the instance defaults filled in, and the admin can edit
+either value. Self-service hashes created through `POST /api/v1/keys` always
+receive the instance defaults.
 
 For storage endpoint details and provider-specific settings, see
 [S3-compatible storage](storage.md). For Worker-backed downloads, see

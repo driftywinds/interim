@@ -7,7 +7,7 @@
         <p>Public user-hash creation is disabled. Ask the admin to generate a hash in <code>/admin</code>; generated hashes are approved automatically. Anonymous uploads return <code>401 uploads_restricted</code>; unapproved hashes return <code>403 upload_not_allowed</code>.</p>
     </div>
     {{end}}
-    <p class="muted">All files are automatically and permanently deleted {{.RetentionRule}}. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} {{if .MultipartEnabled}}This instance uses single PUTs for small files and S3 multipart for files above its configured threshold; the provider's object size limit still applies.{{else}}This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.{{end}}</p>
+    <p class="muted">All files are automatically and permanently deleted {{.RetentionRule}} by default. Admin-issued user hashes can have custom file-size and retention limits. {{if .StorageUnlimited}}There is no global storage cap.{{else}}Storage is capped at {{.MaxStorage}}; new uploads are rejected with HTTP 507 when full.{{end}} {{if .MultipartEnabled}}This instance uses single PUTs for small files and S3 multipart for files above its configured threshold; the provider's object size limit still applies.{{else}}This instance uses single-request PUT uploads, so a file is limited to the smaller of {{.MaxFileSize}} and 5 GB.{{end}}</p>
 
     <nav class="docs-toc" aria-label="API sections">
         <a href="#overview">Overview</a>
@@ -22,7 +22,7 @@
 
     <h2 id="overview">Overview</h2>
     <p><strong>Base URL:</strong> <code>{{.APIBase}}</code></p>
-    <p><strong>Retention:</strong> {{.RetentionLabel}} per file{{if .ExtendRetentionOnDownload}}, refreshed to {{.RetentionLabel}} from the last download{{end}}. <strong>Per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed download lifetime:</strong> {{.DownloadTTL}}.</p>
+    <p><strong>Retention:</strong> {{.RetentionLabel}} per file{{if .ExtendRetentionOnDownload}}, refreshed to {{.RetentionLabel}} from the last download{{end}}. <strong>Default per-file limit:</strong> {{.MaxFileSize}}. <strong>Signed download lifetime:</strong> {{.DownloadTTL}}.</p>
     <p>A single-PUT upload follows three steps:</p>
     <ol>
         <li><code>POST /uploads</code> creates an upload intent, reserves storage, and returns a short-lived presigned PUT URL.</li>

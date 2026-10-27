@@ -5,7 +5,8 @@ info:
   description: |
     interim is a temporary file host. Files expire after the instance's
     configured retention period (7 days by default), or from the last download
-    when sliding retention is enabled. Uploads are direct to
+    when sliding retention is enabled. Admin-issued user hashes may override the
+    per-file size and retention, including unlimited values. Uploads are direct to
     S3-compatible storage: interim reserves quota and signs a short-lived PUT
     URL, the client uploads the bytes, then interim verifies the object and
     commits the file record. Download URLs are short-lived: either signed S3
@@ -119,7 +120,7 @@ paths:
                   format: int64
                   minimum: 1
                   maximum: 5497558138880
-                  description: Maximum is the provider object limit; interim's MAX_FILE_SIZE still applies.
+                  description: Maximum is the provider object limit; the uploader's per-hash limit, instance default, and MAX_STORAGE still apply.
                 content_type:
                   type: string
                   maxLength: 255
@@ -532,7 +533,7 @@ components:
   schemas:
     File:
       type: object
-      required: [id, name, size, content_type, created_at, expires_at, expires_in_seconds, page_url, api_url, owner]
+      required: [id, name, size, content_type, created_at, expires_at, expires_in_seconds, never_expires, page_url, api_url, owner]
       properties:
         id:
           type: string
@@ -552,6 +553,10 @@ components:
         expires_in_seconds:
           type: integer
           format: int64
+          description: Seconds until expiry; 0 when never_expires is true or the file has expired.
+        never_expires:
+          type: boolean
+          description: True when the uploader's user hash has unlimited retention; expires_at is a far-future sentinel.
         page_url:
           type: string
           format: uri
@@ -693,7 +698,7 @@ components:
           $ref: "#/components/schemas/File"
     CreatedKey:
       type: object
-      required: [id, user_hash, key_prefix, approved, created_at, warning]
+      required: [id, user_hash, key_prefix, approved, created_at, max_file_size_bytes, retention_seconds, warning]
       properties:
         id:
           type: string
@@ -710,11 +715,19 @@ components:
         created_at:
           type: string
           format: date-time
+        max_file_size_bytes:
+          type: integer
+          format: int64
+          description: Per-hash file-size limit. 0 means unlimited; provider limits and MAX_STORAGE still apply.
+        retention_seconds:
+          type: integer
+          format: int64
+          description: Per-hash retention. 0 means the hash's files never expire.
         warning:
           type: string
     KeyInfo:
       type: object
-      required: [id, key_prefix, approved, created_at, files, bytes]
+      required: [id, key_prefix, approved, created_at, files, bytes, max_file_size_bytes, retention_seconds]
       properties:
         id:
           type: string
@@ -736,6 +749,14 @@ components:
         bytes:
           type: integer
           format: int64
+        max_file_size_bytes:
+          type: integer
+          format: int64
+          description: Per-hash file-size limit. 0 means unlimited; provider limits and MAX_STORAGE still apply.
+        retention_seconds:
+          type: integer
+          format: int64
+          description: Per-hash retention. 0 means the hash's files never expire.
     DownloadLink:
       type: object
       required: [url, filename, expires_at]
