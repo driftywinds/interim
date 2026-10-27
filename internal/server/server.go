@@ -44,17 +44,20 @@ var (
 )
 
 type Server struct {
-	cfg          config.Config
-	store        *store.Store
-	objects      objects.Store
-	logger       *slog.Logger
-	templates    map[string]*template.Template
-	static       http.Handler
-	assetVersion string
-	downloads    *download.Signer
-	limiter      *rateLimiter
-	dummyHash    []byte
-	now          func() time.Time
+	cfg                 config.Config
+	store               *store.Store
+	objects             objects.Store
+	logger              *slog.Logger
+	templates           map[string]*template.Template
+	static              http.Handler
+	assetVersion        string
+	downloads           *download.Signer
+	limiter             *rateLimiter
+	authLimiter         *rateLimiter
+	loginAccountLimiter *fixedRateLimiter
+	completionSlots     chan struct{}
+	dummyHash           []byte
+	now                 func() time.Time
 
 	keyFlashMu sync.Mutex
 	keyFlashes map[string]adminKeyFlash
@@ -84,17 +87,20 @@ func New(cfg config.Config, st *store.Store, obj objects.Store, logger *slog.Log
 	}
 
 	s := &Server{
-		cfg:          cfg,
-		store:        st,
-		objects:      obj,
-		logger:       logger,
-		templates:    templates,
-		static:       http.FileServerFS(staticFS),
-		assetVersion: staticAssetVersion(),
-		downloads:    downloads,
-		limiter:      newRateLimiter(),
-		now:          time.Now,
-		keyFlashes:   make(map[string]adminKeyFlash),
+		cfg:                 cfg,
+		store:               st,
+		objects:             obj,
+		logger:              logger,
+		templates:           templates,
+		static:              http.FileServerFS(staticFS),
+		assetVersion:        staticAssetVersion(),
+		downloads:           downloads,
+		limiter:             newRateLimiter(),
+		authLimiter:         newRateLimiter(),
+		loginAccountLimiter: &fixedRateLimiter{},
+		completionSlots:     make(chan struct{}, completionLimit(cfg)),
+		now:                 time.Now,
+		keyFlashes:          make(map[string]adminKeyFlash),
 	}
 	dummy, err := bcrypt.GenerateFromPassword([]byte("interim-dummy-password"), 12)
 	if err != nil {
@@ -157,6 +163,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/login", s.handleLoginPage)
 	mux.HandleFunc("POST /admin/login", s.handleLoginSubmit)
 	mux.HandleFunc("POST /admin/logout", s.handleLogout)
+	mux.HandleFunc("POST /admin/logout-all", s.handleLogoutAll)
+	mux.HandleFunc("POST /admin/password", s.handleAdminPassword)
 	mux.HandleFunc("GET /admin", s.handleAdmin)
 	mux.HandleFunc("GET /admin/{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusMovedPermanently)
@@ -176,6 +184,29 @@ func (s *Server) Handler() http.Handler {
 	handler = s.recoverMiddleware(handler)
 	handler = s.securityHeadersMiddleware(handler)
 	return handler
+}
+
+func completionLimit(cfg config.Config) int {
+	if cfg.MaxConcurrentCompletions > 0 {
+		return cfg.MaxConcurrentCompletions
+	}
+	return 8
+}
+
+func (s *Server) acquireCompletion() bool {
+	select {
+	case s.completionSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseCompletion() {
+	select {
+	case <-s.completionSlots:
+	default:
+	}
 }
 
 func (s *Server) cookieName(base string) string {
@@ -200,10 +231,20 @@ func (s *Server) basePage(r *http.Request, title, active string) PageData {
 }
 
 func (s *Server) downloadURL(ctx context.Context, file store.File) (string, time.Time, error) {
-	if s.downloads != nil {
-		return s.downloads.URL(file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL, s.now().UTC())
+	ttl := s.cfg.DownloadTTL
+	if !file.ExpiresAt.IsZero() {
+		remaining := file.ExpiresAt.Sub(s.now())
+		if remaining < ttl {
+			ttl = remaining
+		}
 	}
-	return s.objects.PresignGet(ctx, file.ObjectKey, file.OriginalName, s.cfg.DownloadTTL)
+	if ttl <= 0 {
+		return "", time.Time{}, errors.New("file has expired")
+	}
+	if s.downloads != nil {
+		return s.downloads.URL(file.ObjectKey, file.OriginalName, ttl, s.now().UTC())
+	}
+	return s.objects.PresignGet(ctx, file.ObjectKey, file.OriginalName, ttl)
 }
 
 func (s *Server) pageURL(id string) string {
@@ -460,7 +501,7 @@ func (s *Server) clientIP(r *http.Request) string {
 	}
 	remoteAddr = remoteAddr.Unmap()
 	if !s.cfg.TrustProxy || !s.isTrustedProxy(remoteAddr) {
-		return remoteAddr.String()
+		return clientNetwork(remoteAddr)
 	}
 
 	var chain []string
@@ -478,15 +519,23 @@ func (s *Server) clientIP(r *http.Request) string {
 		}
 		addr = addr.Unmap()
 		if !s.isTrustedProxy(addr) {
-			return addr.String()
+			return clientNetwork(addr)
 		}
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		if addr, err := netip.ParseAddr(realIP); err == nil {
-			return addr.Unmap().String()
-		}
+	// Every address in the chain is a trusted proxy. Returning the proxy itself
+	// is safer than trusting an unauthenticated X-Real-IP fallback.
+	return clientNetwork(remoteAddr)
+}
+
+// clientNetwork collapses IPv6 clients to their /64. A single host normally
+// controls the whole /64, so keying limits on the full address lets an attacker
+// rotate within it for free.
+func clientNetwork(addr netip.Addr) string {
+	addr = addr.Unmap()
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
 	}
-	return remoteAddr.String()
+	return addr.String()
 }
 
 func (s *Server) isTrustedProxy(addr netip.Addr) bool {

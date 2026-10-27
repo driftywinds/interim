@@ -25,8 +25,9 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("object not found")
-	ErrNoSuchUpload = errors.New("multipart upload not found")
+	ErrNotFound           = errors.New("object not found")
+	ErrNoSuchUpload       = errors.New("multipart upload not found")
+	ErrPreconditionFailed = errors.New("object precondition failed")
 )
 
 type MultipartPart struct {
@@ -56,14 +57,14 @@ type ObjectInfo struct {
 
 type Store interface {
 	Delete(ctx context.Context, key string) error
-	Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error
+	Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition, sourceETag string) error
 	CreateMultipart(ctx context.Context, key, contentType, contentDisposition string) (string, error)
 	PresignUploadPart(ctx context.Context, key, uploadID string, partNumber int, contentLength int64, ttl time.Duration) (string, time.Time, error)
 	ListParts(ctx context.Context, key, uploadID string) ([]MultipartPartInfo, error)
 	CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) error
 	AbortMultipart(ctx context.Context, key, uploadID string) error
 	ListMultipartUploads(ctx context.Context, prefix string) ([]MultipartUploadInfo, error)
-	PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error)
+	PresignPut(ctx context.Context, key, contentType, contentDisposition string, contentLength int64, ttl time.Duration) (string, time.Time, error)
 	PresignGet(ctx context.Context, key, filename string, ttl time.Duration) (string, time.Time, error)
 	Head(ctx context.Context, key string) (ObjectInfo, error)
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
@@ -198,7 +199,7 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error {
+func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition, sourceETag string) error {
 	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(dstKey),
@@ -209,7 +210,13 @@ func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, content
 	if contentDisposition != "" {
 		input.ContentDisposition = aws.String(contentDisposition)
 	}
+	if sourceETag != "" {
+		input.CopySourceIfMatch = aws.String(`"` + strings.Trim(sourceETag, `"`) + `"`)
+	}
 	if _, err := s.client.CopyObject(ctx, input); err != nil {
+		if isPreconditionFailed(err) {
+			return ErrPreconditionFailed
+		}
 		return fmt.Errorf("copy object: %w", err)
 	}
 	return nil
@@ -345,12 +352,15 @@ func (s *S3Store) AbortMultipart(ctx context.Context, key, uploadID string) erro
 	return nil
 }
 
-func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error) {
+func (s *S3Store) PresignPut(ctx context.Context, key, contentType, contentDisposition string, contentLength int64, ttl time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().UTC().Add(ttl)
 	input := &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		ContentType: aws.String(contentType),
+	}
+	if contentLength > 0 {
+		input.ContentLength = aws.Int64(contentLength)
 	}
 	if contentDisposition != "" {
 		input.ContentDisposition = aws.String(contentDisposition)
@@ -438,6 +448,17 @@ func (s *S3Store) Health(ctx context.Context) error {
 		return fmt.Errorf("S3 health check: %w", err)
 	}
 	return nil
+}
+
+func isPreconditionFailed(err error) bool {
+	if errors.Is(err, ErrPreconditionFailed) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "PreconditionFailed"
+	}
+	return false
 }
 
 func isNoSuchUpload(err error) bool {

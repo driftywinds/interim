@@ -43,7 +43,8 @@ curl -X DELETE https://files.example.com/api/v1/files/FILE_ID \
 Upload intents return a per-file `delete_token` (shown once); use
 `X-Delete-Token: <token>` with `DELETE /api/v1/files/{id}` to remove anonymous
 files. Raw user hashes, upload tokens, and delete tokens are stored only as
-SHA-256 hashes.
+SHA-256 hashes. The single-PUT URL signs the intent's declared `Content-Length`,
+and completion requires the stored object to have exactly that size.
 
 ### Multipart mode
 

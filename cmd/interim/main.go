@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +18,19 @@ import (
 	"interim/internal/server"
 	"interim/internal/store"
 )
+
+func isLocalOrigin(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && (addr.IsLoopback() || addr.IsPrivate())
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -35,6 +50,16 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+
+	if !cfg.TrustProxy {
+		logger.Warn("TRUST_PROXY=false: per-IP limits use the direct peer address; behind Caddy/cloudflared set TRUST_PROXY=true and TRUSTED_PROXY_CIDRS")
+	}
+	if !isLocalOrigin(cfg.PublicBaseURL) && strings.HasPrefix(cfg.PublicBaseURL, "http://") {
+		logger.Warn("PUBLIC_BASE_URL is plain HTTP; TLS is required for secure cookies and to protect presigned URLs", "url", cfg.PublicBaseURL)
+	}
+	if cfg.S3.PublicEndpoint != "" && !isLocalOrigin(cfg.S3.PublicEndpoint) && strings.HasPrefix(cfg.S3.PublicEndpoint, "http://") {
+		logger.Warn("S3_PUBLIC_ENDPOINT is plain HTTP; presigned upload signatures can be observed in transit", "endpoint", cfg.S3.PublicEndpoint)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

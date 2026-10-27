@@ -7,8 +7,8 @@ larger than that, use the [Tailscale-only route](tailscale-sss3.md) instead.
 Upgrade note: single-PUT completion performs a server-side `CopyObject` from a
 staging key to an unexposed live key. Multipart completion uses the staging key
 as the live object and avoids that copy. `S3_ENDPOINT` must still reach sss3
-directly, not through the public Caddy listener, because that listener blocks
-`CopyObject` for single PUTs.
+directly, not through the public Caddy listener, because that listener strips
+`X-Amz-Copy-Source` and therefore cannot perform the single-PUT copy.
 
 ## Checked-in sss3 stack
 
@@ -34,8 +34,10 @@ Caddy:
 - answers `OPTIONS` with `204` and the CORS headers;
 - allows the exact `INTERIM_ORIGIN` (the interim web origin);
 - exposes `ETag`, `Content-Length`, and `Content-Disposition`;
-- rejects `X-Amz-Copy-Source` and `X-Amz-Copy-Source-Range`, preventing a
-  presigned PUT from switching into `CopyObject` or `UploadPartCopy`;
+- strips every `X-Amz-*` request header before proxying, which prevents a
+  presigned PUT from switching into `CopyObject`, `UploadPartCopy`, an ACL,
+  tagging, object-lock, SSE, storage-class or future copy variant (an allowlist
+  rather than a denylist);
 - forwards all other requests to sss3 while preserving the public `Host`
   header that SigV4 signs.
 
@@ -68,10 +70,10 @@ S3_FORCE_PATH_STYLE=true
 S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true
 ```
 
-`S3_ENDPOINT` must not point at the public Caddy listener: that listener blocks
-`CopyObject`. Put interim on the same Docker network as this stack, or otherwise
-give it a direct/private route to sss3. Keep `S3_PUBLIC_ENDPOINT` on the public
-Caddy hostname.
+`S3_ENDPOINT` must not point at the public Caddy listener: that listener strips
+`X-Amz-Copy-Source`, so it cannot perform `CopyObject`. Put interim on the same
+Docker network as this stack, or otherwise give it a direct/private route to
+sss3. Keep `S3_PUBLIC_ENDPOINT` on the public Caddy hostname.
 
 If multipart is enabled and sss3 rejects normal part PUTs with
 `SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` and keep
@@ -111,47 +113,27 @@ matter for this deployment:
 - Add a Cache Rule bypass for the S3 hostname.
 - Rotate the sss3 credentials before deployment.
 - Pin the sss3 image by digest in production, for example with `SSS3_IMAGE`.
-- The checked-in [Caddyfile.sss3](../Caddyfile.sss3) blocks the headers that can
-  turn a presigned PUT into `CopyObject` or `UploadPartCopy`. Keep that block on
-  every public sss3 proxy.
+- The checked-in [Caddyfile.sss3](../Caddyfile.sss3) strips every `X-Amz-*`
+  request header, so new S3 copy/ACL/tagging variants cannot slip past a fixed
+  denylist. Keep that `header_up -X-Amz-*` rule on every public sss3 proxy, and
+  use `S3_PUT_ACCESS_KEY`/`S3_PUT_SECRET_KEY` when your provider supports a
+  write-only identity.
 
 ## Example CORS listener
 
 An alternative Caddy listener to put in front of sss3 (Cloudflare Tunnel points
 at this listener; Caddy preserves the original `Host` header for SigV4). The
-copy-operation matchers must come before the `handle` blocks:
+`header_up -X-Amz-*` rule is the important part: it removes every S3 operation
+header before the request reaches sss3, including future copy/ACL/tagging
+variants that a denylist would miss.
 
 ```caddyfile
 :8080 {
-    @copyop header X-Amz-Copy-Source *
-    respond @copyop "CopyObject is not allowed on the public endpoint" 403
-
-    @copyrange header X-Amz-Copy-Source-Range *
-    respond @copyrange "CopyPart is not allowed on the public endpoint" 403
-
-    @amzacl header X-Amz-Acl *
-    respond @amzacl "ACL headers are not allowed on the public endpoint" 403
-
-    @amztagging header X-Amz-Tagging *
-    respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
-
-    @amzmetadata header X-Amz-Metadata-Directive *
-    respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
-
-    @amzlockmode header X-Amz-Object-Lock-Mode *
-    respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
-
-    @amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
-    respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
-
-    @amzlockhold header X-Amz-Object-Lock-Legal-Hold *
-    respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
-
     @options method OPTIONS
     handle @options {
         header Access-Control-Allow-Origin "https://interim.example.com"
-        header Access-Control-Allow-Methods "PUT, GET, HEAD, DELETE, OPTIONS"
-        header Access-Control-Allow-Headers "Content-Type, Content-Disposition"
+        header Access-Control-Allow-Methods "PUT, GET, HEAD, OPTIONS"
+        header Access-Control-Allow-Headers "Content-Type, Content-Disposition, Content-Length"
         header Access-Control-Max-Age "86400"
         respond 204
     }
@@ -160,6 +142,7 @@ copy-operation matchers must come before the `handle` blocks:
         header Access-Control-Expose-Headers "ETag, Content-Length, Content-Disposition"
         reverse_proxy stupid-simple-s3:5553 {
             header_up Host {http.request.hostport}
+            header_up -X-Amz-*
         }
     }
 }

@@ -43,12 +43,21 @@ func scanFile(scanner rowScanner) (File, error) {
 // concurrent uploads from overshooting the configured global or per-client
 // limits. Non-positive limits disable the corresponding check.
 func (s *Store) ReserveStorage(ctx context.Context, id string, bytes int64, owner string, limits ReservationLimits, now, expiresAt time.Time) (bool, error) {
+	// Expired reservations are no longer capacity. Delete them here (the
+	// trigger adjusts reserved_bytes) so the fast path below never has to
+	// aggregate old rows.
+	if _, err := s.db.ExecContext(ctx,
+		"DELETE FROM storage_reservations WHERE expires_at <= ?", toUnix(now),
+	); err != nil {
+		return false, fmt.Errorf("clear expired reservations: %w", err)
+	}
+
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO storage_reservations (id, bytes, owner, created_at, expires_at)
 		 SELECT ?, ?, ?, ?, ?
 		 WHERE (? <= 0 OR (
-		     COALESCE((SELECT SUM(size) FROM files), 0) +
-		     COALESCE((SELECT SUM(bytes) FROM storage_reservations WHERE expires_at > ?), 0) +
+		     COALESCE((SELECT file_bytes FROM usage_totals WHERE id = 1), 0) +
+		     COALESCE((SELECT reserved_bytes FROM usage_totals WHERE id = 1), 0) +
 		     ?
 		 ) <= ?)
 		 AND (? <= 0 OR (
@@ -59,11 +68,11 @@ func (s *Store) ReserveStorage(ctx context.Context, id string, bytes int64, owne
 		     SELECT COUNT(*) FROM storage_reservations WHERE owner = ? AND expires_at > ?
 		 ) < ?)
 		 AND (? <= 0 OR (
-		     (SELECT COUNT(*) FROM files) +
+		     (SELECT files FROM usage_totals WHERE id = 1) +
 		     (SELECT COUNT(*) FROM storage_reservations WHERE expires_at > ?)
 		 ) < ?)`,
 		id, bytes, owner, toUnix(now), toUnix(expiresAt),
-		limits.TotalBytes, toUnix(now), bytes, limits.TotalBytes,
+		limits.TotalBytes, bytes, limits.TotalBytes,
 		limits.ClientBytes, owner, toUnix(now), bytes, limits.ClientBytes,
 		limits.ClientPending, owner, toUnix(now), limits.ClientPending,
 		limits.TotalFiles, toUnix(now), limits.TotalFiles,
@@ -162,17 +171,13 @@ func (s *Store) ExpiredFiles(ctx context.Context, now time.Time, limit int) ([]F
 }
 
 func (s *Store) StorageUsage(ctx context.Context, now time.Time) (Usage, error) {
+	// The janitor clears expired reservations every minute and adjusts the
+	// trigger-maintained total. Reading the counter keeps status/health cheap.
 	var usage Usage
 	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files",
-	).Scan(&usage.Files, &usage.Used); err != nil {
-		return Usage{}, fmt.Errorf("files storage usage: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COALESCE(SUM(bytes), 0) FROM storage_reservations WHERE expires_at > ?",
-		toUnix(now),
-	).Scan(&usage.Reserved); err != nil {
-		return Usage{}, fmt.Errorf("reserved storage usage: %w", err)
+		"SELECT files, file_bytes, reserved_bytes FROM usage_totals WHERE id = 1",
+	).Scan(&usage.Files, &usage.Used, &usage.Reserved); err != nil {
+		return Usage{}, fmt.Errorf("read storage usage: %w", err)
 	}
 	return usage, nil
 }

@@ -12,7 +12,9 @@ docker compose up --build
 ```
 
 The Compose file binds the Go listener to `127.0.0.1:8080`; put Caddy,
-cloudflared, or another trusted proxy in front of it for public access. Open
+cloudflared, or another trusted proxy in front of it for public access. When you
+do, set `TRUST_PROXY=true` and `TRUSTED_PROXY_CIDRS` to that proxy's source
+range; otherwise all per-IP limits collapse into one global bucket. Open
 `http://localhost:8080/setup` and enter the one-time setup token:
 
 ```sh

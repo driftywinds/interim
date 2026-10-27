@@ -19,6 +19,37 @@ type rateLimiter struct {
 	lastGC  time.Time
 }
 
+// fixedRateLimiter protects a single global counter that must not be evicted by
+// a flood of unrelated keys. It is used for the single admin account.
+type fixedRateLimiter struct {
+	mu     sync.Mutex
+	window rateWindow
+}
+
+func (l *fixedRateLimiter) allow(limit int, window time.Duration) (bool, time.Duration) {
+	if limit <= 0 {
+		return true, 0
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.window.reset.IsZero() || now.After(l.window.reset) {
+		l.window = rateWindow{count: 1, reset: now.Add(window)}
+		return true, 0
+	}
+	if l.window.count >= limit {
+		return false, time.Until(l.window.reset)
+	}
+	l.window.count++
+	return true, 0
+}
+
+func (l *fixedRateLimiter) reset() {
+	l.mu.Lock()
+	l.window = rateWindow{}
+	l.mu.Unlock()
+}
+
 func newRateLimiter() *rateLimiter {
 	return &rateLimiter{
 		windows: make(map[string]*rateWindow),
@@ -45,10 +76,7 @@ func (l *rateLimiter) allow(key string, limit int, window time.Duration) (bool, 
 		l.lastGC = now
 	}
 	for len(l.windows) >= maxRateLimitWindows {
-		for key := range l.windows {
-			delete(l.windows, key)
-			break
-		}
+		l.evictOldestLocked()
 	}
 
 	entry, ok := l.windows[key]
@@ -61,6 +89,22 @@ func (l *rateLimiter) allow(key string, limit int, window time.Duration) (bool, 
 	}
 	entry.count++
 	return true, 0
+}
+
+// evictOldestLocked removes the entry closest to expiry. Random eviction let a
+// key flood reset unrelated counters; auth counters use a separate limiter, so
+// even a full general-purpose map cannot evict them.
+func (l *rateLimiter) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for key, entry := range l.windows {
+		if oldestKey == "" || entry.reset.Before(oldest) {
+			oldestKey, oldest = key, entry.reset
+		}
+	}
+	if oldestKey != "" {
+		delete(l.windows, oldestKey)
+	}
 }
 
 func (l *rateLimiter) reset(key string) {

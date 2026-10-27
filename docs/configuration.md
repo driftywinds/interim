@@ -15,15 +15,16 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `COOKIE_SECURE` | no | `auto` | `auto` follows the scheme of `PUBLIC_BASE_URL`. `__Host-` cookie names are used when secure. |
 | `TRUST_PROXY` | no | `false` | Trust forwarded headers from peers in `TRUSTED_PROXY_CIDRS`. |
 | `TRUSTED_PROXY_CIDRS` | with `TRUST_PROXY` | — | Comma/space-separated proxy CIDRs or IPs. Required and validated when `TRUST_PROXY=true`. |
-| `ADMIN_SESSION_TTL` | no | `12h` | 15m–168h. |
+| `ADMIN_SESSION_TTL` | no | `12h` | Absolute session lifetime, 15m–168h. |
+| `ADMIN_IDLE_TIMEOUT` | no | `2h` | Revoke an admin session after this much inactivity, 5m–168h. |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error`. |
 | `S3_ENDPOINT` | AWS no | — | Include scheme. Leave empty for AWS S3. Used for server-side Head/Copy/List/Delete. |
 | `S3_PUBLIC_ENDPOINT` | no | `S3_ENDPOINT` | Endpoint embedded in presigned URLs; must be browser-reachable. |
 | `S3_REGION` | no | `us-east-1` | Any non-empty value for servers that ignore regions. |
 | `S3_BUCKET` | yes | — | Must be a bare bucket name. |
-| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | AWS no | — | Leave both empty to use the instance-role/default credential chain. |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | AWS no | — | Leave both empty to use the instance-role/default credential chain. Placeholder values such as `change-me` or `replace-with-*` are rejected. |
 | `S3_PUT_ACCESS_KEY` / `S3_PUT_SECRET_KEY` | no | — | Optional write-only identity used only for presigned browser PUTs. Required for multipart unless the next flag is set. |
-| `S3_PUBLIC_ENDPOINT_BLOCKS_COPY` | no | `false` | Set true only when the public endpoint rejects copy headers. Allows multipart without write-only upload credentials. |
+| `S3_PUBLIC_ENDPOINT_BLOCKS_COPY` | no | `false` | Operator assertion that the public endpoint strips every `X-Amz-*` request header. Allows multipart without write-only upload credentials. |
 | `S3_FORCE_PATH_STYLE` | no | `true` | Keep true for sss3/MinIO/Garage; false for AWS. |
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
@@ -35,8 +36,8 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `MULTIPART_PART_SIZE` | no | `16MB` | Requested part size. 5MB–5GB; raised automatically for the 10,000-part limit. |
 | `MULTIPART_CONCURRENCY` | no | `3` | Browser part parallelism, 1–8. |
 | `MULTIPART_SIGN_PART_LENGTH` | no | `true` | Sign the exact part Content-Length into presigned URLs. Disable only if the provider cannot verify signed Content-Length. |
-| `MAX_PENDING_UPLOADS_PER_CLIENT` | no | `2` | Per-key or per-IP pending intent cap. `0` disables. |
-| `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Per-key or per-IP reserved-byte cap. `0` disables. |
+| `MAX_PENDING_UPLOADS_PER_CLIENT` | no | `2` | Pending intent cap per approved hash or per client network. `0` disables. Unapproved/self-service hashes share the per-IP bucket. |
+| `MAX_RESERVED_BYTES_PER_CLIENT` | no | `MAX_FILE_SIZE` | Reserved-byte cap per approved hash or per client network. `0` disables. |
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
 | `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set. Files above 5GB require multipart uploads. |
 | `MAX_FILES` | no | `100000` | Global committed-file count cap. `0` disables. |
@@ -44,7 +45,9 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. Also the worker download token lifetime. |
 | `DOWNLOAD_WORKER_ENABLED` | no | `false` | Use Cloudflare Worker download URLs instead of presigned S3 GETs. |
 | `DOWNLOAD_WORKER_URLS` | worker mode yes | — | Comma/space-separated HTTPS worker base URLs. The `/d/<token>` path is appended. |
-| `DOWNLOAD_WORKER_SECRET` | worker mode yes | — | At least 32 characters; must match the worker's `DOWNLOAD_TOKEN_SECRET`. |
+| `DOWNLOAD_WORKER_SECRET` | worker mode yes | — | At least 32 characters; must match the worker's `DOWNLOAD_TOKEN_SECRET`. Placeholder values are rejected. |
+| `SWEEP_ON_STARTUP` | no | `false` | Delete unknown objects under `S3_OBJECT_PREFIX` at startup. Leave false unless the prefix is dedicated to this database. |
+| `MAX_CONCURRENT_COMPLETIONS` | no | `8` | Upper bound on detached upload finalizations, 1–256. |
 
 For storage endpoint details and provider-specific settings, see
 [S3-compatible storage](storage.md). For Worker-backed downloads, see

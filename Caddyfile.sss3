@@ -10,38 +10,16 @@
 
 :8080 {
 	# A presigned PutObject must never be able to switch into CopyObject or
-	# UploadPartCopy. sss3 (and some other S3 clones) can otherwise be tricked
-	# into copying an arbitrary readable object into the uploader's key.
-	@copyop header X-Amz-Copy-Source *
-	respond @copyop "CopyObject is not allowed on the public endpoint" 403
-
-	@copyrange header X-Amz-Copy-Source-Range *
-	respond @copyrange "CopyPart is not allowed on the public endpoint" 403
-
-	@amzacl header X-Amz-Acl *
-	respond @amzacl "ACL headers are not allowed on the public endpoint" 403
-
-	@amztagging header X-Amz-Tagging *
-	respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
-
-	@amzmetadata header X-Amz-Metadata-Directive *
-	respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
-
-	@amzlockmode header X-Amz-Object-Lock-Mode *
-	respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
-
-	@amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
-	respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
-
-	@amzlockhold header X-Amz-Object-Lock-Legal-Hold *
-	respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
-
+	# UploadPartCopy. Denylisting known headers misses new X-Amz-* variants, so
+	# the proxy strips every X-Amz-* request header (see header_up below).
+	# Browser uploads only need Host, Content-Type, Content-Disposition and
+	# Content-Length; the signature itself is in the query string.
 	@options method OPTIONS
 	handle @options {
 		header {
 			Access-Control-Allow-Origin "{$INTERIM_ORIGIN}"
-			Access-Control-Allow-Methods "PUT, GET, HEAD, DELETE, OPTIONS"
-			Access-Control-Allow-Headers "Content-Type, Content-Disposition"
+			Access-Control-Allow-Methods "PUT, GET, HEAD, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type, Content-Disposition, Content-Length"
 			Access-Control-Max-Age "86400"
 			Vary "Origin"
 		}
@@ -58,6 +36,9 @@
 		reverse_proxy stupid-simple-s3:5553 {
 			# Required: preserve the host and, for Tailscale, the port.
 			header_up Host {http.request.hostport}
+			# Allowlist: sss3 never sees any X-Amz-* request header, including
+			# future Copy/ACL/tagging/grants/SSE/storage-class variants.
+			header_up -X-Amz-*
 		}
 	}
 }

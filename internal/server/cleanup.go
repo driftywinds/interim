@@ -96,6 +96,16 @@ func (s *Server) deepSweep(ctx context.Context, startup bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Refuse the catastrophic case outright: a fresh or restored-empty database
+	// must never reinterpret an entire bucket as garbage. The ratio guard also
+	// stops a partially restored database or a bucket shared with another
+	// instance from deleting most of the objects in one pass.
+	if len(objectsList) > 0 && len(known) == 0 {
+		return 0, errors.New("refusing orphan sweep: database knows no objects under the prefix")
+	}
+	if len(known) > 0 && len(objectsList)-len(known) > len(known) {
+		return 0, errors.New("refusing orphan sweep: more than half of the listed objects are unknown")
+	}
 	now := s.now().UTC()
 	deleted := 0
 	var firstErr error
@@ -217,12 +227,23 @@ func (s *Server) MaintenanceOnce(ctx context.Context) {
 	} else if removed > 0 {
 		s.logger.Info("janitor cleared expired admin sessions", "count", removed)
 	}
+	if s.cfg.AdminIdleTimeout > 0 {
+		if removed, err := s.store.DeleteIdleSessions(ctx, s.now().Add(-s.cfg.AdminIdleTimeout)); err != nil {
+			s.logger.Warn("idle session cleanup failed", "error", err)
+		} else if removed > 0 {
+			s.logger.Info("janitor cleared idle admin sessions", "count", removed)
+		}
+	}
 }
 
 // StartupMaintenance runs before the HTTP listener and performs both the fast
 // cleanup and a zero-grace orphan sweep.
 func (s *Server) StartupMaintenance(ctx context.Context) {
 	s.MaintenanceOnce(ctx)
+	if !s.cfg.SweepOnStartup {
+		s.logger.Info("startup orphan sweep disabled; set SWEEP_ON_STARTUP=true to enable it")
+		return
+	}
 	if deleted, err := s.deepSweep(ctx, true); err != nil {
 		s.logger.Warn("startup orphan object sweep failed", "error", err)
 	} else if deleted > 0 {

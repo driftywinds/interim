@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"interim/internal/store"
@@ -117,15 +118,32 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	detail := s.loopbackRequest(r)
 	if _, err := s.store.StorageUsage(ctx, s.now()); err != nil {
-		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "database": "unavailable"})
+		body := map[string]string{"status": "error"}
+		if detail {
+			body["database"] = "unavailable"
+		}
+		s.writeJSON(w, http.StatusServiceUnavailable, body)
 		return
 	}
 	if err := s.cachedStorageHealth(ctx); err != nil {
-		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "storage": "unavailable"})
+		body := map[string]string{"status": "error"}
+		if detail {
+			body["storage"] = "unavailable"
+		}
+		s.writeJSON(w, http.StatusServiceUnavailable, body)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) loopbackRequest(r *http.Request) bool {
+	addr, err := netip.ParseAddr(remoteHost(r.RemoteAddr))
+	if err != nil {
+		return false
+	}
+	return addr.Unmap().IsLoopback()
 }
 
 // cachedStorageHealth protects the public health endpoint from turning into an

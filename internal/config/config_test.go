@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
@@ -45,6 +44,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.UploadURLTTL != 30*time.Minute || cfg.UploadIntentTTL != 45*time.Minute {
 		t.Errorf("upload TTLs = %v / %v", cfg.UploadURLTTL, cfg.UploadIntentTTL)
+	}
+	if cfg.AdminIdleTimeout != 2*time.Hour || cfg.SweepOnStartup {
+		t.Errorf("session/sweep defaults = %v / %v", cfg.AdminIdleTimeout, cfg.SweepOnStartup)
 	}
 	if cfg.MaxFileSize != MaxSinglePutSize {
 		t.Errorf("max file size = %d", cfg.MaxFileSize)
@@ -123,7 +125,7 @@ func TestMultipartConfigRejectsUnsafeValues(t *testing.T) {
 
 func TestSetupTokenCanBeSuppliedByEnv(t *testing.T) {
 	withBaseEnv(t)
-	token := strings.Repeat("s", 32)
+	token := "0123456789abcdefghijklmnopqrstuv"
 	t.Setenv("SETUP_TOKEN", token)
 	cfg, err := Load()
 	if err != nil {
@@ -325,6 +327,29 @@ func TestLoadRejectsBadValues(t *testing.T) {
 			t.Setenv(name, value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("Load() expected error for %s=%q", name, value)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsPlaceholderSecrets(t *testing.T) {
+	tests := map[string]string{
+		"SESSION_SECRET":         "replace-with-at-least-32-random-characters",
+		"SETUP_TOKEN":            "replace-with-at-least-32-random-characters",
+		"DOWNLOAD_WORKER_SECRET": "replace-with-at-least-32-random-characters",
+		"S3_SECRET_KEY":          "change-me",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			withBaseEnv(t)
+			t.Setenv("DOWNLOAD_WORKER_ENABLED", "true")
+			t.Setenv("DOWNLOAD_WORKER_URLS", "https://dl.example.test")
+			if name != "DOWNLOAD_WORKER_SECRET" {
+				t.Setenv("DOWNLOAD_WORKER_SECRET", "0123456789abcdef0123456789abcdef")
+			}
+			t.Setenv(name, value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted placeholder %s=%q", name, value)
 			}
 		})
 	}

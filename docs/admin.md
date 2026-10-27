@@ -11,8 +11,13 @@ requires the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`). The admin can:
 - approve/unapprove uploads and revoke/restore authentication without exposing
   the raw hash.
 
-Admin POSTs are CSRF-protected. Login is rate-limited. Passwords are bcrypt
-hashes (cost 12). There is intentionally only one admin account.
+Admin POSTs are CSRF-protected. Login is rate-limited per IP and per account;
+password minimum is 12 characters. Passwords are bcrypt hashes (cost 12).
+Sessions have an absolute `ADMIN_SESSION_TTL` and an idle
+`ADMIN_IDLE_TIMEOUT`. **Logout** ends the current session; **Sign out
+everywhere** revokes every session for the admin. The **Admin password** form
+changes the password after verifying the current one and revokes every session,
+including the current browser. There is intentionally only one admin account.
 
 When `PUBLIC_UPLOADS_ENABLED=false`, only approved hashes can upload. Hashes
 that existed before the switch are not grandfathered in, so approve them from

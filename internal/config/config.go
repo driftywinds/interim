@@ -43,6 +43,7 @@ type Config struct {
 	DatabasePath      string
 	SessionSecret     []byte
 	SessionTTL        time.Duration
+	AdminIdleTimeout  time.Duration
 	CookieSecure      bool
 	TrustProxy        bool
 	TrustedProxyCIDRs []netip.Prefix
@@ -64,8 +65,10 @@ type Config struct {
 	MultipartPartSize          int64
 	MultipartConcurrency       int
 	MultipartSignPartLength    bool
+	MaxConcurrentCompletions   int
 
 	PublicUploadsEnabled bool
+	SweepOnStartup       bool
 
 	DownloadWorkerEnabled bool
 	DownloadWorkerURLs    []string
@@ -169,6 +172,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxConcurrentCompletions, err := parseIntLimit("MAX_CONCURRENT_COMPLETIONS", 8, 1, 256)
+	if err != nil {
+		return Config{}, err
+	}
+	sweepOnStartup, err := parseBool("SWEEP_ON_STARTUP", false)
+	if err != nil {
+		return Config{}, err
+	}
 	if multipartThreshold > MaxSinglePutSize {
 		return Config{}, fmt.Errorf("MULTIPART_THRESHOLD cannot exceed %s", units.FormatBytes(MaxSinglePutSize))
 	}
@@ -225,6 +236,13 @@ func Load() (Config, error) {
 	if sessionTTL < 15*time.Minute || sessionTTL > 7*24*time.Hour {
 		return Config{}, errors.New("ADMIN_SESSION_TTL must be between 15m and 168h")
 	}
+	adminIdleTimeout, err := parseDuration("ADMIN_IDLE_TIMEOUT", "2h")
+	if err != nil {
+		return Config{}, err
+	}
+	if adminIdleTimeout < 5*time.Minute || adminIdleTimeout > 7*24*time.Hour {
+		return Config{}, errors.New("ADMIN_IDLE_TIMEOUT must be between 5m and 168h")
+	}
 
 	cookieSecure, err := parseCookieSecure(os.Getenv("COOKIE_SECURE"), base)
 	if err != nil {
@@ -266,7 +284,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if multipartEnabled && s3.PutAccessKey == "" && !s3.PublicEndpointBlocksCopy {
-		return Config{}, errors.New("multipart uploads require S3_PUT_ACCESS_KEY/S3_PUT_SECRET_KEY, or S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true when the public endpoint blocks X-Amz-Copy-Source")
+		return Config{}, errors.New("multipart uploads require S3_PUT_ACCESS_KEY/S3_PUT_SECRET_KEY, or S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true when the public endpoint strips every X-Amz-* request header")
 	}
 
 	logLevel := strings.ToLower(envOr("LOG_LEVEL", "info"))
@@ -283,6 +301,7 @@ func Load() (Config, error) {
 		DatabasePath:               databasePath,
 		SessionSecret:              secret,
 		SessionTTL:                 sessionTTL,
+		AdminIdleTimeout:           adminIdleTimeout,
 		CookieSecure:               cookieSecure,
 		TrustProxy:                 trustProxy,
 		TrustedProxyCIDRs:          trustedProxyCIDRs,
@@ -303,7 +322,9 @@ func Load() (Config, error) {
 		MultipartPartSize:          multipartPartSize,
 		MultipartConcurrency:       multipartConcurrency,
 		MultipartSignPartLength:    multipartSignPartLength,
+		MaxConcurrentCompletions:   maxConcurrentCompletions,
 		PublicUploadsEnabled:       publicUploadsEnabled,
+		SweepOnStartup:             sweepOnStartup,
 		DownloadWorkerEnabled:      downloadWorkerEnabled,
 		DownloadWorkerURLs:         downloadWorkerURLs,
 		DownloadWorkerSecret:       downloadWorkerSecret,
@@ -317,8 +338,8 @@ func loadDownloadWorker(enabled bool, rawURLs, rawSecret string) ([]string, stri
 	}
 
 	secret := strings.TrimSpace(rawSecret)
-	if len(secret) < 32 {
-		return nil, "", errors.New("DOWNLOAD_WORKER_SECRET must be at least 32 characters when DOWNLOAD_WORKER_ENABLED=true")
+	if err := validateSecret("DOWNLOAD_WORKER_SECRET", secret, 32); err != nil {
+		return nil, "", err
 	}
 
 	parts := strings.FieldsFunc(rawURLs, func(r rune) bool {
@@ -386,10 +407,26 @@ func loadS3() (S3Config, error) {
 	if (accessKey == "") != (secretKey == "") {
 		return S3Config{}, errors.New("S3_ACCESS_KEY and S3_SECRET_KEY must be set together (leave both empty for the instance role chain)")
 	}
+	for name, value := range map[string]string{
+		"S3_ACCESS_KEY": accessKey,
+		"S3_SECRET_KEY": secretKey,
+	} {
+		if err := validatePlaceholder(name, value); err != nil {
+			return S3Config{}, err
+		}
+	}
 	putAccessKey := strings.TrimSpace(os.Getenv("S3_PUT_ACCESS_KEY"))
 	putSecretKey := strings.TrimSpace(os.Getenv("S3_PUT_SECRET_KEY"))
 	if (putAccessKey == "") != (putSecretKey == "") {
 		return S3Config{}, errors.New("S3_PUT_ACCESS_KEY and S3_PUT_SECRET_KEY must be set together")
+	}
+	for name, value := range map[string]string{
+		"S3_PUT_ACCESS_KEY": putAccessKey,
+		"S3_PUT_SECRET_KEY": putSecretKey,
+	} {
+		if err := validatePlaceholder(name, value); err != nil {
+			return S3Config{}, err
+		}
 	}
 
 	pathStyle, err := parseBool("S3_FORCE_PATH_STYLE", true)
@@ -478,8 +515,8 @@ func optionalEndpoint(name, value string) (string, error) {
 
 func loadSetupToken(dataDir string) (string, string, error) {
 	if configured := strings.TrimSpace(os.Getenv("SETUP_TOKEN")); configured != "" {
-		if len(configured) < 32 {
-			return "", "", errors.New("SETUP_TOKEN must be at least 32 characters")
+		if err := validateSecret("SETUP_TOKEN", configured, 32); err != nil {
+			return "", "", err
 		}
 		return configured, "", nil
 	}
@@ -488,8 +525,8 @@ func loadSetupToken(dataDir string) (string, string, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		token := strings.TrimSpace(string(data))
-		if len(token) < 32 {
-			return "", "", fmt.Errorf("%s is invalid; remove it or set SETUP_TOKEN", path)
+		if err := validateSecret("SETUP_TOKEN", token, 32); err != nil {
+			return "", "", fmt.Errorf("%s is invalid (%v); remove it or set SETUP_TOKEN", path, err)
 		}
 		return token, path, nil
 	}
@@ -580,10 +617,57 @@ func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
 	return prefixes, nil
 }
 
+var placeholderMarkers = []string{
+	"replace-with",
+	"change-me",
+	"changeme",
+	"change_me",
+	"example-secret",
+	"example.com",
+	"your-secret",
+	"your_secret",
+	"insert-secret",
+	"placeholder",
+}
+
+// validateSecret rejects the checked-in example values and trivially weak
+// values. Operators routinely uncomment .env.example lines without editing
+// them; accepting those as real secrets turns a public example into an
+// authentication bypass.
+func validateSecret(name, value string, minLen int) error {
+	if len(value) < minLen {
+		return fmt.Errorf("%s must be at least %d characters", name, minLen)
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range placeholderMarkers {
+		if strings.Contains(lower, marker) {
+			return fmt.Errorf("%s still contains the placeholder %q; generate a random value", name, marker)
+		}
+	}
+	unique := make(map[rune]struct{}, len(value))
+	for _, r := range value {
+		unique[r] = struct{}{}
+	}
+	if len(unique) < 8 {
+		return fmt.Errorf("%s has too little entropy; generate a random value", name)
+	}
+	return nil
+}
+
+func validatePlaceholder(name, value string) error {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range placeholderMarkers {
+		if strings.Contains(lower, marker) {
+			return fmt.Errorf("%s still contains the placeholder %q; generate real credentials", name, marker)
+		}
+	}
+	return nil
+}
+
 func loadSessionSecret(dataDir string) ([]byte, error) {
 	if configured := strings.TrimSpace(os.Getenv("SESSION_SECRET")); configured != "" {
-		if len(configured) < 32 {
-			return nil, errors.New("SESSION_SECRET must be at least 32 characters")
+		if err := validateSecret("SESSION_SECRET", configured, 32); err != nil {
+			return nil, err
 		}
 		return []byte(configured), nil
 	}
@@ -591,10 +675,11 @@ func loadSessionSecret(dataDir string) ([]byte, error) {
 	path := filepath.Join(dataDir, "session_secret")
 	data, err := os.ReadFile(path)
 	if err == nil {
-		if len(strings.TrimSpace(string(data))) < 32 {
-			return nil, fmt.Errorf("%s is invalid; remove it or set SESSION_SECRET", path)
+		secret := strings.TrimSpace(string(data))
+		if err := validateSecret("SESSION_SECRET", secret, 32); err != nil {
+			return nil, fmt.Errorf("%s is invalid (%v); remove it or set SESSION_SECRET", path, err)
 		}
-		return []byte(strings.TrimSpace(string(data))), nil
+		return []byte(secret), nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read session secret: %w", err)

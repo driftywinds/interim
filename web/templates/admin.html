@@ -7,6 +7,10 @@
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         <button type="submit" class="link-button">Logout</button>
     </form>
+    <form method="post" action="/admin/logout-all" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button type="submit" class="link-button">Sign out everywhere</button>
+    </form>
 </nav>
 
 {{if not .PublicUploads}}
@@ -93,6 +97,21 @@
         {{if .NextURL}}<a href="{{.NextURL}}">Next →</a>{{end}}
     </nav>
     {{end}}
+</fieldset>
+
+<fieldset class="admin-section" id="password">
+    <legend>Admin password</legend>
+    <p class="muted">Changing the password revokes every admin session, including this one.</p>
+    <form method="post" action="/admin/password" class="search-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label for="current-password">Current password</label>
+        <input type="password" id="current-password" name="current_password" autocomplete="current-password" required>
+        <label for="new-password">New password</label>
+        <input type="password" id="new-password" name="password" minlength="12" autocomplete="new-password" required>
+        <label for="confirm-password">Confirm new password</label>
+        <input type="password" id="confirm-password" name="password_confirm" minlength="12" autocomplete="new-password" required>
+        <button type="submit">Change password</button>
+    </form>
 </fieldset>
 
 <fieldset class="admin-section" id="keys">

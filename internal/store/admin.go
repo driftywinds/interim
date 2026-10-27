@@ -58,6 +58,36 @@ func (s *Store) AdminByUsername(ctx context.Context, username string) (Admin, er
 	return admin, nil
 }
 
+// UpdateAdminPassword replaces the password hash and revokes every existing
+// session in the same transaction.
+func (s *Store) UpdateAdminPassword(ctx context.Context, id int64, passwordHash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin password update: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx,
+		"UPDATE admin SET password_hash = ? WHERE id = ?", passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update admin password: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update admin password rows: %w", err)
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE admin_id = ?", id); err != nil {
+		return fmt.Errorf("revoke sessions after password change: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit password update: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) AdminByID(ctx context.Context, id int64) (Admin, error) {
 	var admin Admin
 	var created int64

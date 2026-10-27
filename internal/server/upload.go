@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -101,7 +100,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		Size        int64  `json:"size"`
 		ContentType string `json:"content_type"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONStrict(r.Body, &request); err != nil {
 		if errors.Is(err, io.EOF) {
 			s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with name and size is required.")
 			return
@@ -232,7 +231,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		response.StatusURL = s.cfg.PublicBaseURL + "/api/v1/uploads/" + uploadID
 		response.Warning = "Request part URLs, PUT each part, report its ETag, then call complete_url with the upload token. Keep delete_token private."
 	} else {
-		url, expiresAt, err := s.objects.PresignPut(r.Context(), objectKey, contentType, disposition, s.cfg.UploadURLTTL)
+		url, expiresAt, err := s.objects.PresignPut(r.Context(), objectKey, contentType, disposition, request.Size, s.cfg.UploadURLTTL)
 		if err != nil {
 			s.logger.Error("presign upload", "upload_id", uploadID, "error", err)
 			if closeErr := s.store.CloseUploadIntent(r.Context(), uploadID, "failed", s.now()); closeErr != nil {
@@ -322,6 +321,12 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.uploadRateLimit(w, r, "uploadcomplete:"+intent.ID+":"+s.clientIP(r), 20, time.Minute) {
 		return
 	}
+	if !s.acquireCompletion() {
+		w.Header().Set("Retry-After", "5")
+		s.writeAPIError(w, r, http.StatusTooManyRequests, "completion_busy", "Too many uploads are finalizing. Retry completion shortly.")
+		return
+	}
+	defer s.releaseCompletion()
 
 	// Finalization can outlive proxy/server write timeouts and must survive a
 	// client disconnect. The operation is idempotent, so a client that gives up
@@ -430,9 +435,9 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.failUploadIntent(r.Context(), intent, "Uploaded object is empty.")
 		s.writeAPIError(w, r, http.StatusBadRequest, "empty_file", "The uploaded object is empty.")
 		return
-	case info.Size > intent.DeclaredSize:
-		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds declared size.")
-		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_too_large", "The uploaded object is larger than the declared size.")
+	case info.Size != intent.DeclaredSize:
+		s.failUploadIntent(r.Context(), intent, "Uploaded object size does not match the declared size.")
+		s.writeAPIError(w, r, http.StatusRequestEntityTooLarge, "file_size_mismatch", "The uploaded object size does not match the declared size.")
 		return
 	case info.Size > s.cfg.MaxFileSize:
 		s.failUploadIntent(r.Context(), intent, "Uploaded object exceeds per-file cap.")
@@ -454,11 +459,17 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 			liveKey,
 			intent.ContentType,
 			objects.AttachmentDisposition(intent.OriginalName),
+			info.ETag,
 		); err != nil {
 			// Another completion may have committed the intent while this one was
 			// copying. Return the committed file instead of failing the retry.
 			if committed, ok := s.committedFile(r.Context(), intent.ID); ok {
 				s.writeJSON(w, http.StatusOK, completeUploadDTO{UploadID: intent.ID, File: s.fileDTO(committed)})
+				return
+			}
+			if errors.Is(err, objects.ErrPreconditionFailed) {
+				s.failUploadIntent(r.Context(), intent, "Staging object changed between verification and copy.")
+				s.writeAPIError(w, r, http.StatusConflict, "upload_changed", "The uploaded object changed during finalization. Upload it again.")
 				return
 			}
 			s.logger.Error("copy uploaded object", "upload_id", intent.ID, "error", err)
@@ -593,7 +604,7 @@ func (s *Server) handleUploadPartURLs(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		PartNumbers []int `json:"part_numbers"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONStrict(r.Body, &request); err != nil {
 		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with part_numbers is required.")
 		return
 	}
@@ -667,7 +678,7 @@ func (s *Server) handleUploadPartReport(w http.ResponseWriter, r *http.Request) 
 		ETag string `json:"etag"`
 		Size int64  `json:"size"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONStrict(r.Body, &request); err != nil {
 		s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "A JSON body with etag and size is required.")
 		return
 	}
@@ -741,8 +752,12 @@ func (s *Server) deleteObjectBestEffort(key, reason string) {
 	}
 }
 
+// reservationOwner namespaces quota accounting. Only admin-approved hashes get
+// an independent bucket; self-service and anonymous uploads share the network
+// owner. Otherwise anyone can mint a fresh hash and reserve another full quota
+// without uploading a byte.
 func (s *Server) reservationOwner(key *store.APIKey, ip string) string {
-	if key != nil {
+	if key != nil && key.Approved {
 		return "key:" + key.ID
 	}
 	mac := hmac.New(sha256.New, s.cfg.SessionSecret)

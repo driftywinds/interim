@@ -29,12 +29,16 @@ export default {
             return errorResponse(403, "Download token expired", env, request);
         }
         if (typeof claims.k !== "string" || claims.k.length === 0 ||
+            !Number.isSafeInteger(claims.e) ||
             typeof claims.n !== "string" || claims.n.length === 0) {
             return errorResponse(403, "Invalid download token payload", env, request);
         }
         const keyPrefix = String(env.B2_KEY_PREFIX || "");
         if (!keyPrefix.endsWith("/") || !claims.k.startsWith(keyPrefix)) {
             return errorResponse(403, "Object is outside the configured prefix", env, request);
+        }
+        if (!validObjectKey(claims.k)) {
+            return errorResponse(403, "Invalid object key", env, request);
         }
 
         let b2URL;
@@ -139,6 +143,12 @@ async function verifyToken(token, env) {
         throw new Error("bad payload");
     }
     return claims;
+}
+
+function validObjectKey(key) {
+    if (/[\\\u0000-\u001f\u007f]/.test(key)) return false;
+    const segments = key.split("/");
+    return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function objectURL(env, key) {

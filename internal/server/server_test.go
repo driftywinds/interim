@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,6 +31,7 @@ import (
 type fakeObject struct {
 	data         []byte
 	contentType  string
+	etag         string
 	lastModified time.Time
 }
 
@@ -45,12 +48,15 @@ type fakeMultipart struct {
 }
 
 type fakeStore struct {
-	mu            sync.Mutex
-	objects       map[string]fakeObject
-	multipart     map[string]*fakeMultipart
-	nextMultipart int
-	abortErr      error
-	healthCalls   int
+	mu               sync.Mutex
+	objects          map[string]fakeObject
+	multipart        map[string]*fakeMultipart
+	nextMultipart    int
+	abortErr         error
+	healthCalls      int
+	presignPutLength int64
+	presignPutCalls  int
+	beforeCopy       func()
 }
 
 func newFakeStore() *fakeStore {
@@ -60,9 +66,14 @@ func newFakeStore() *fakeStore {
 	}
 }
 
+func objectETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func (f *fakeStore) putObject(key string, data []byte, modified time.Time) {
 	f.mu.Lock()
-	f.objects[key] = fakeObject{data: data, contentType: "application/octet-stream", lastModified: modified}
+	f.objects[key] = fakeObject{data: data, contentType: "application/octet-stream", etag: objectETag(data), lastModified: modified}
 	f.mu.Unlock()
 }
 
@@ -140,6 +151,7 @@ func (f *fakeStore) CompleteMultipart(ctx context.Context, key, uploadID string,
 	f.objects[key] = fakeObject{
 		data:         data,
 		contentType:  upload.contentType,
+		etag:         objectETag(data),
 		lastModified: time.Now(),
 	}
 	delete(f.multipart, uploadID)
@@ -179,22 +191,33 @@ func (f *fakeStore) putPart(uploadID string, partNumber int, data []byte) string
 	return etag
 }
 
-func (f *fakeStore) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition string) error {
+func (f *fakeStore) Copy(ctx context.Context, srcKey, dstKey, contentType, contentDisposition, sourceETag string) error {
+	if f.beforeCopy != nil {
+		f.beforeCopy()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	object, ok := f.objects[srcKey]
 	if !ok {
 		return objects.ErrNotFound
 	}
+	if sourceETag != "" && sourceETag != object.etag {
+		return objects.ErrPreconditionFailed
+	}
 	f.objects[dstKey] = fakeObject{
 		data:         append([]byte(nil), object.data...),
 		contentType:  contentType,
+		etag:         object.etag,
 		lastModified: time.Now(),
 	}
 	return nil
 }
 
-func (f *fakeStore) PresignPut(ctx context.Context, key, contentType, contentDisposition string, ttl time.Duration) (string, time.Time, error) {
+func (f *fakeStore) PresignPut(ctx context.Context, key, contentType, contentDisposition string, contentLength int64, ttl time.Duration) (string, time.Time, error) {
+	f.mu.Lock()
+	f.presignPutLength = contentLength
+	f.presignPutCalls++
+	f.mu.Unlock()
 	return "https://storage.test/put/" + url.PathEscape(key) + "?signature=test", time.Now().Add(ttl), nil
 }
 
@@ -213,6 +236,7 @@ func (f *fakeStore) Head(ctx context.Context, key string) (objects.ObjectInfo, e
 		Key:          key,
 		Size:         int64(len(object.data)),
 		ContentType:  object.contentType,
+		ETag:         object.etag,
 		LastModified: object.lastModified,
 	}, nil
 }
@@ -586,6 +610,46 @@ func TestDownloadURLUsesConfiguredWorkers(t *testing.T) {
 	}
 }
 
+func TestDownloadURLExpiresWithFile(t *testing.T) {
+	signer, err := download.NewSigner("0123456789abcdef0123456789abcdef", []string{"https://dl.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{
+		cfg:       config.Config{DownloadTTL: 5 * time.Minute},
+		downloads: signer,
+		now:       func() time.Time { return time.Unix(1_700_000_000, 0) },
+	}
+	file := store.File{
+		ObjectKey:    "files/abc",
+		OriginalName: "short.txt",
+		ExpiresAt:    s.now().Add(time.Minute),
+	}
+	_, expires, err := s.downloadURL(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expires.Equal(file.ExpiresAt) {
+		t.Fatalf("download expiry = %v, want file expiry %v", expires, file.ExpiresAt)
+	}
+}
+
+func TestRedactPathRemovesCapabilityIDs(t *testing.T) {
+	tests := map[string]string{
+		"/f/secret-id":                "/f/[id]",
+		"/f/secret-id/download":       "/f/[id]/download",
+		"/api/v1/files/secret-id":     "/api/v1/files/[id]",
+		"/api/v1/uploads/secret-id":   "/api/v1/uploads/[id]",
+		"/api/v1/uploads/secret-id/x": "/api/v1/uploads/[id]/x",
+		"/api/v1/status":              "/api/v1/status",
+	}
+	for input, want := range tests {
+		if got := redactPath(input); got != want {
+			t.Errorf("redactPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestStaticAssetsAreVersioned(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
 	status, body := getBody(t, env.client, env.http.URL+"/")
@@ -926,6 +990,17 @@ func TestMultipartRejectsOversizedProviderParts(t *testing.T) {
 	}
 }
 
+func TestDeepSweepRefusesEmptyDatabase(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.fake.putObject("files/orphan-object", []byte("do not delete"), time.Now().Add(-time.Hour))
+	if _, err := env.server.deepSweep(context.Background(), true); err == nil {
+		t.Fatal("deep sweep should refuse when the database knows no objects")
+	}
+	if !env.fake.exists("files/orphan-object") {
+		t.Fatal("deep sweep deleted an object despite the empty-database guard")
+	}
+}
+
 func TestDeepSweepAbortsUnknownMultipart(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 20)
 	id, err := env.fake.CreateMultipart(context.Background(), "files/uploads/orphan-multipart", "application/octet-stream", "")
@@ -996,10 +1071,13 @@ func TestReservationPerClientCaps(t *testing.T) {
 		t.Fatalf("third intent status = %d: %s", status, body)
 	}
 
-	_, userHash := env.createKey(t)
+	keyID, userHash := env.createKey(t)
+	if err := env.store.SetAPIKeyApproved(context.Background(), keyID, true); err != nil {
+		t.Fatal(err)
+	}
 	status, body, _ = env.createIntent(t, userHash, "owned.bin", 1, "")
 	if status != http.StatusCreated {
-		t.Fatalf("authenticated owner should have a separate reservation bucket: %d: %s", status, body)
+		t.Fatalf("approved owner should have a separate reservation bucket: %d: %s", status, body)
 	}
 
 	bytesEnv := newTestEnv(t, 20<<20, 5<<20)
@@ -1012,6 +1090,62 @@ func TestReservationPerClientCaps(t *testing.T) {
 	status, body, _ = bytesEnv.createIntent(t, "", "two.bin", 2, "")
 	if status != http.StatusInsufficientStorage {
 		t.Fatalf("second byte-capped intent = %d: %s", status, body)
+	}
+}
+
+func TestUnapprovedHashesShareNetworkQuota(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.server.cfg.MaxPendingUploadsPerClient = 1
+	_, firstHash := env.createKey(t)
+	_, secondHash := env.createKey(t)
+
+	status, body, _ := env.createIntent(t, firstHash, "first.bin", 1, "")
+	if status != http.StatusCreated {
+		t.Fatalf("first self-service intent = %d: %s", status, body)
+	}
+	status, body, _ = env.createIntent(t, secondHash, "second.bin", 1, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("second self-service hash bypassed the network quota: %d: %s", status, body)
+	}
+}
+
+func TestSinglePutSignsDeclaredLength(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, _ := env.createIntent(t, "", "sized.bin", 1234, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent = %d: %s", status, body)
+	}
+	env.fake.mu.Lock()
+	length := env.fake.presignPutLength
+	calls := env.fake.presignPutCalls
+	env.fake.mu.Unlock()
+	if calls != 1 || length != 1234 {
+		t.Fatalf("presigned PUT length = %d (calls %d), want 1234", length, calls)
+	}
+}
+
+func TestCopyPreconditionRejectsChangedStagingObject(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, intent := env.createIntent(t, "", "raced.bin", 5, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent = %d: %s", status, body)
+	}
+	env.fake.putObject(stagingKey(intent.UploadID), []byte("hello"), time.Now())
+	env.fake.beforeCopy = func() {
+		env.fake.mu.Lock()
+		object := env.fake.objects[stagingKey(intent.UploadID)]
+		object.data = []byte("HELLO")
+		object.etag = objectETag(object.data)
+		env.fake.objects[stagingKey(intent.UploadID)] = object
+		env.fake.mu.Unlock()
+	}
+	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
+	if completeStatus != http.StatusConflict || !bytes.Contains(completeBody, []byte(`"upload_changed"`)) {
+		t.Fatalf("changed staging object completion = %d: %s", completeStatus, completeBody)
+	}
+	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "failed" {
+		t.Fatalf("intent after precondition failure = %+v, %v", stored, err)
 	}
 }
 
@@ -1038,11 +1172,20 @@ func TestClientIPTrustedProxyChain(t *testing.T) {
 		t.Fatalf("untrusted peer spoofed IP = %q", got)
 	}
 
+	// A trusted proxy with no usable X-Forwarded-For chain must not let the
+	// client spoof its identity through the unauthenticated X-Real-IP header.
 	realIP := httptest.NewRequest(http.MethodGet, "/", nil)
 	realIP.RemoteAddr = "127.0.0.1:1234"
 	realIP.Header.Set("X-Real-IP", "203.0.113.10")
-	if got := s.clientIP(realIP); got != "203.0.113.10" {
-		t.Fatalf("trusted X-Real-IP = %q", got)
+	if got := s.clientIP(realIP); got != "127.0.0.1" {
+		t.Fatalf("X-Real-IP fallback = %q", got)
+	}
+
+	ipv6 := httptest.NewRequest(http.MethodGet, "/", nil)
+	ipv6.RemoteAddr = "127.0.0.1:1234"
+	ipv6.Header.Set("X-Forwarded-For", "2001:db8:1234:5678:aaaa:bbbb:cccc:dddd")
+	if got := s.clientIP(ipv6); got != "2001:db8:1234:5678::/64" {
+		t.Fatalf("IPv6 network = %q", got)
 	}
 }
 
@@ -1428,6 +1571,33 @@ func TestExpiryAndCleanup(t *testing.T) {
 	}
 }
 
+func TestAdminPasswordChangeRevokesSessions(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	env.setupAdmin(t)
+	status, body := getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusOK {
+		t.Fatalf("admin page = %d", status)
+	}
+	csrf := extractCSRF(t, body)
+	response, err := env.client.PostForm(env.http.URL+"/admin/password", url.Values{
+		"csrf_token":       {csrf},
+		"current_password": {"correct-horse-battery"},
+		"password":         {"new-correct-horse-battery"},
+		"password_confirm": {"new-correct-horse-battery"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/admin/login" {
+		t.Fatalf("password change = %d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+	status, _ = getBody(t, env.client, env.http.URL+"/admin")
+	if status != http.StatusSeeOther {
+		t.Fatalf("old session survived password change: %d", status)
+	}
+}
+
 func TestAdminFileDelete(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
 	env.setupAdmin(t)
@@ -1582,6 +1752,7 @@ func TestJanitorExpiresAbandonedUpload(t *testing.T) {
 
 func TestJanitorOrphanSweepAtStartup(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
+	env.server.cfg.SweepOnStartup = true
 	env.fake.putObject("files/orphan-object", []byte("orphan"), time.Now().Add(-time.Hour))
 	status, body, active := env.createIntent(t, "", "active.bin", 4, "")
 	if status != http.StatusCreated {

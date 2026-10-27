@@ -13,6 +13,7 @@
 *.sqlite3-wal
 *.sqlite3-journal
 session_secret
+setup_token
 *.pid
 *.log
 
@@ -44,6 +45,7 @@ coverage.html
 # Local development / research artifacts
 /.research/
 /.gocache/
+/.gotmp/
 /.tmp/
 /.browser-profile*/
 /edgeprof/

@@ -1,3 +1,4 @@
+# Pin base images by digest for reproducible/secure production builds.
 FROM golang:1.27-alpine AS build
 
 WORKDIR /src

@@ -1,6 +1,8 @@
 # sss3 + Caddy CORS proxy.
 #
 # The old sss3-only container must be stopped first. This stack reuses ./data.
+# Do not point interim's DATA_DIR at this directory: the SQLite database,
+# session secret, and sss3 object store would share a writable directory.
 # Caddy publishes host port 5553, so the existing Cloudflare Tunnel target
 # http://localhost:5553 keeps working and now hits Caddy instead of sss3.
 #
@@ -32,6 +34,7 @@ services:
       - sss3
 
   caddy:
+    # Pin this by digest in production too.
     image: caddy:2-alpine
     container_name: sss3-cors
     restart: unless-stopped

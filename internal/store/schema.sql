@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     admin_id    INTEGER NOT NULL REFERENCES admin(id) ON DELETE CASCADE,
     csrf_token  TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    expires_at  INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
@@ -87,3 +88,43 @@ CREATE TABLE IF NOT EXISTS upload_parts (
 );
 
 CREATE INDEX IF NOT EXISTS upload_parts_upload_id ON upload_parts(upload_id);
+
+-- Running totals used by quota checks. Triggers keep them exact so
+-- ReserveStorage does not scan 100k file rows on every public request.
+CREATE TABLE IF NOT EXISTS usage_totals (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    files          INTEGER NOT NULL DEFAULT 0,
+    file_bytes     INTEGER NOT NULL DEFAULT 0,
+    reserved_bytes INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO usage_totals (id, files, file_bytes, reserved_bytes)
+VALUES (1, 0, 0, 0);
+
+CREATE TRIGGER IF NOT EXISTS files_usage_insert AFTER INSERT ON files
+BEGIN
+    UPDATE usage_totals
+    SET files = files + 1, file_bytes = file_bytes + NEW.size
+    WHERE id = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS files_usage_delete AFTER DELETE ON files
+BEGIN
+    UPDATE usage_totals
+    SET files = files - 1, file_bytes = file_bytes - OLD.size
+    WHERE id = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS reservations_usage_insert AFTER INSERT ON storage_reservations
+BEGIN
+    UPDATE usage_totals
+    SET reserved_bytes = reserved_bytes + NEW.bytes
+    WHERE id = 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS reservations_usage_delete AFTER DELETE ON storage_reservations
+BEGIN
+    UPDATE usage_totals
+    SET reserved_bytes = reserved_bytes - OLD.bytes
+    WHERE id = 1;
+END;

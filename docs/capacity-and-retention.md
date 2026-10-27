@@ -4,7 +4,8 @@
 declared size before interim signs anything, so concurrent uploads cannot both
 believe they fit. The reservation is converted into a committed file only after
 the object is verified. The actual object size is checked with `HeadObject` at
-completion; a smaller object is accepted and a larger one is deleted.
+completion and must match the declared size exactly; a mismatch is rejected and
+the staging object is deleted.
 
 Set `MAX_STORAGE=0` (or `MAX_STORAGE=unlimited`) to disable the global cap. The
 per-file limit still applies, the API reports `storage.unlimited: true`, and the
@@ -22,12 +23,13 @@ intents (default 100000; set `0` to disable). It limits the metadata and
 deep-sweep working set even when many tiny files would fit within
 `MAX_STORAGE`.
 
-Pending intents are also limited per owner (an authenticated key ID or an HMAC
-of the client IP): `MAX_PENDING_UPLOADS_PER_CLIENT` defaults to 2 and
+Pending intents are also limited per owner: an admin-approved key ID gets its
+own bucket, while anonymous and self-service (unapproved) hashes share an HMAC
+of the client network. `MAX_PENDING_UPLOADS_PER_CLIENT` defaults to 2 and
 `MAX_RESERVED_BYTES_PER_CLIENT` defaults to `MAX_FILE_SIZE`. Set either to `0`
-to disable that check. A single client therefore cannot reserve the entire
-global quota with a handful of unauthenticated intents, though a distributed
-attacker is still a WAF/rate-limit concern.
+to disable that check. Minting new self-service hashes therefore cannot
+multiply the reservation cap, though a distributed attacker is still a
+WAF/rate-limit concern.
 
 `RETENTION` is read from the environment when the process starts. Each committed
 file gets an expiry of `completed_at + RETENTION`; changing the value applies to
@@ -97,16 +99,19 @@ single-PUT, so existing behavior is unchanged unless this is enabled.
 
 Abandoned or failed uploads are cleaned by a janitor:
 
-- fast pass every minute: expired pending intents, expired files, expired
-  sessions, expired reservations, terminal intent rows older than 24 hours;
-- security pass at startup and every 30 minutes: list the configured S3 prefix,
-  delete objects with no matching file row or live pending intent, and abort
-  provider multipart uploads whose upload ID is not in `upload_intents`;
-- at startup it runs before the HTTP listener, so old state is reconciled before
-  accepting requests;
+- fast pass every minute: expired pending intents, expired files, expired and
+  idle sessions, expired reservations, terminal intent rows older than 24 hours;
+- security pass every 30 minutes: list the configured S3 prefix, delete objects
+  with no matching file row or live pending intent, and abort provider
+  multipart uploads whose upload ID is not in `upload_intents`;
+- the startup pass is opt-in (`SWEEP_ON_STARTUP=true`). Leave it off unless the
+  bucket/prefix is dedicated to this database, because a restored-old or fresh
+  database would otherwise treat live objects as orphans;
+- both startup and runtime sweeps refuse to delete anything when the database
+  knows no objects under the prefix, or when more than half of the listed objects
+  are unknown;
 - during runtime, unknown objects get a 15-minute grace period to avoid racing a
-  just-completed PUT. At startup no browser upload can be in flight, so unknown
-  objects are removed immediately;
+  just-completed PUT;
 - browser cancellation calls the abort endpoint, which deletes the object and
   releases the reservation immediately;
 - if completion reports an oversized or empty object, the object is deleted and
@@ -116,12 +121,12 @@ The upload token is separate from the file delete token. Both are stored only as
 SHA-256 hashes. A completion retry for an already-committed intent returns the
 existing file instead of duplicating it.
 
-Because a presigned PUT cannot enforce a content-length condition at the storage
-layer, a client can temporarily upload more than it declared. Completion checks
-the staging object's real size and deletes anything that exceeds the declared
-size or `MAX_FILE_SIZE`. After commit, only the untouched live copy is served.
-Keep `UPLOAD_URL_TTL` short and use a bucket lifecycle rule if temporary staging
-cost exposure is a concern.
+The single-PUT URL signs the declared `Content-Length`, so the provider rejects
+a body of a different size. Completion still checks the staging object's exact
+size (and `MAX_FILE_SIZE`) before copying. The uploader's PUT URL remains valid
+until `UPLOAD_URL_TTL`, but it can only write the declared number of bytes to
+the staging key, and that key is deleted after commit. Keep the TTL short and use
+a bucket lifecycle rule if temporary staging cost exposure is a concern.
 
 For extra safety, configure a bucket lifecycle rule for the configured prefix.
 The application does not require it, but it limits cost if the server is offline

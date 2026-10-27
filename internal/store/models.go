@@ -12,12 +12,13 @@ type Admin struct {
 }
 
 type Session struct {
-	TokenHash []byte
-	AdminID   int64
-	Username  string
-	CSRF      string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	TokenHash  []byte
+	AdminID    int64
+	Username   string
+	CSRF       string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
 }
 
 type APIKey struct {

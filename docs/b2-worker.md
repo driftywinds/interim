@@ -21,7 +21,7 @@ Configure interim:
 ```dotenv
 DOWNLOAD_WORKER_ENABLED=true
 DOWNLOAD_WORKER_URLS=https://dl1.example.com,https://dl2.example.com
-DOWNLOAD_WORKER_SECRET=replace-with-at-least-32-random-characters
+DOWNLOAD_WORKER_SECRET=<openssl rand -base64 48>
 
 S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com
 S3_PUBLIC_ENDPOINT=https://s3.us-west-004.backblazeb2.com
@@ -45,8 +45,13 @@ S3_AUTO_CREATE_BUCKET=false
   outside that prefix.
 - Worker URLs must use HTTPS. `DOWNLOAD_WORKER_URLS` rejects plain HTTP.
 - A token can be replayed until it expires, and every range/HEAD request counts
-  against the Worker quota. Add a Cloudflare rate-limiting rule for `/d/*`,
-  keep `DOWNLOAD_URL_TTL` short, and monitor request volume.
+  against the Worker quota. Add a Cloudflare rate-limiting rule for `/d/*`
+  (for example 60 requests/minute per IP), keep `DOWNLOAD_URL_TTL` short, and
+  monitor request volume. interim clamps a token's expiry to the file's own
+  `expires_at`, so a link cannot outlive retention by a full TTL.
+- The Worker rejects token keys containing `..`, empty segments, backslashes, or
+  control characters before signing a B2 request. Keep `B2_KEY_PREFIX` scoped to
+  the bucket prefix as defence in depth.
 
 Deploy the Worker from [worker/README.md](../worker/README.md). It includes the
 wrangler config, read-only B2 key scope, custom-domain setup, and the
@@ -59,3 +64,5 @@ large-file/video delivery policy still applies to the download domain.
 
 The Worker is stateless and cannot revoke an issued token early; expiry is the
 revocation mechanism. Treat `/d/*` as public and rate-limit it at Cloudflare.
+Deleting the file removes the object, but a token already issued remains valid
+(and returns 404) until it expires.

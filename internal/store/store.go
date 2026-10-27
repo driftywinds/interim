@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 6"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -72,6 +72,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // EXISTS. Existing user hashes deliberately start unapproved: enabling the
 // upload allowlist must not silently authorize hashes created earlier.
 func migrate(ctx context.Context, db *sql.DB) error {
+	if err := ensureColumn(ctx, db, "sessions", "last_seen_at",
+		`ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, db, "api_keys", "approved",
 		`ALTER TABLE api_keys ADD COLUMN approved INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1))`); err != nil {
 		return err
@@ -97,6 +101,21 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		 ON storage_reservations(owner, expires_at)`,
 	); err != nil {
 		return fmt.Errorf("create reservation owner index: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS storage_reservations_owner_expires_bytes
+		 ON storage_reservations(owner, expires_at, bytes)`,
+	); err != nil {
+		return fmt.Errorf("create reservation owner bytes index: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO usage_totals (id, files, file_bytes, reserved_bytes)
+		 SELECT 1,
+		        (SELECT COUNT(*) FROM files),
+		        COALESCE((SELECT SUM(size) FROM files), 0),
+		        COALESCE((SELECT SUM(bytes) FROM storage_reservations), 0)`,
+	); err != nil {
+		return fmt.Errorf("rebuild usage totals: %w", err)
 	}
 	return nil
 }

@@ -8,8 +8,13 @@
 - Set `TRUST_PROXY=true` only behind a proxy you control, and list the proxy
   source addresses in `TRUSTED_PROXY_CIDRS` (for example
   `127.0.0.1/32,::1/128`). Forwarded headers from other peers are ignored.
+  If you leave `TRUST_PROXY=false` behind Caddy/cloudflared, every request
+  appears to come from the proxy: per-IP login, upload, key-creation and download
+  limits become global, and one failed-login burst can lock out the admin.
 - Keep the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`) private. The file
-  is removed after the first admin is created.
+  is removed after the first admin is created. Generate real values with
+  `openssl rand -base64 48`; the loader rejects the `.env.example` placeholder
+  strings and known placeholder S3 credentials.
 - The S3 bucket must be browser-reachable at `S3_PUBLIC_ENDPOINT`, with the CORS
   policy in [S3-compatible storage](storage.md). The bucket itself stays
   private; only presigned PUTs and short-lived download URLs are exposed.
@@ -18,11 +23,18 @@
   internal or otherwise exempt from that block.
 - Run one instance per SQLite database. The reservation and intent state
   machines rely on SQLite's single-writer behaviour.
-- Use a dedicated `S3_OBJECT_PREFIX`. The janitor treats objects under that
-  prefix as interim-owned and deletes ones with no matching file or live intent.
+- Use a dedicated bucket and `S3_OBJECT_PREFIX`. The janitor treats objects
+  under that prefix as interim-owned and deletes ones with no matching file or
+  live intent. The startup sweep is disabled by default; runtime sweeps still
+  run after a 15-minute grace period and refuse to act if the database knows no
+  objects or most listed objects are unknown. Never share the prefix with
+  another instance, a test environment, or unrelated data.
 - Keep the bucket private. Do not enable public ACLs or public bucket policies.
 - The Docker example uses a read-only root filesystem, a writable `/data`
   volume, and a non-root user.
+- Keep `DATA_DIR` (SQLite/session secret) separate from the sss3 data directory.
+  Never point both at `./data`; the object store must not be able to overwrite
+  the database or secret files.
 - Back up the `/data` volume. Only S3 holds file bytes; SQLite holds the mapping,
   expiry, delete-token hashes, sessions, quotas, upload intents, setup state,
   and admin credentials.
@@ -43,7 +55,8 @@
   which holds the data and RW credential) and pin GitHub Actions to commit SHAs
   rather than mutable major tags.
 - Add a Cloudflare rate limit for the Worker download path `/d/*`; tokens are
-  bearer credentials until they expire.
+  bearer credentials until they expire. The Worker has no built-in per-IP limit.
+  Download token expiry is clamped to the file's own expiry.
 
 For route-specific deployment, see [sss3 with Cloudflare and Caddy](sss3-cloudflare.md),
 [Tailscale-only sss3](tailscale-sss3.md), or

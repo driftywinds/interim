@@ -44,14 +44,16 @@ docker compose -f compose.sss3.yaml --env-file .env.sss3 up -d
 ```caddyfile
 reverse_proxy stupid-simple-s3:5553 {
     header_up Host {http.request.hostport}
+    header_up -X-Amz-*
 }
 ```
 
 Do not use `{http.request.host}` here. That placeholder strips the port. A
 request to `http://100.x.y.z:5554` is signed for
 `Host: 100.x.y.z:5554`; stripping the port to `100.x.y.z` produces
-`SignatureDoesNotMatch` from sss3. The checked-in `Caddyfile.sss3` also keeps
-the `X-Amz-Copy-Source` rejection; preserve that rule.
+`SignatureDoesNotMatch` from sss3. The `header_up -X-Amz-*` line is the
+allowlist that prevents copy/ACL/tagging operations; keep it on every public
+sss3 proxy.
 
 Reload Caddy after the change:
 
@@ -118,32 +120,11 @@ append this block; do not replace the existing configuration:
 
 ```caddyfile
 sss3.example.com {
-    @copyop header X-Amz-Copy-Source *
-    respond @copyop "CopyObject is not allowed on the public endpoint" 403
-
-    @copyrange header X-Amz-Copy-Source-Range *
-    respond @copyrange "CopyPart is not allowed on the public endpoint" 403
-
-    @amzacl header X-Amz-Acl *
-    respond @amzacl "ACL headers are not allowed on the public endpoint" 403
-
-    @amztagging header X-Amz-Tagging *
-    respond @amztagging "Tagging headers are not allowed on the public endpoint" 403
-
-    @amzmetadata header X-Amz-Metadata-Directive *
-    respond @amzmetadata "Metadata overrides are not allowed on the public endpoint" 403
-
-    @amzlockmode header X-Amz-Object-Lock-Mode *
-    respond @amzlockmode "Object-lock headers are not allowed on the public endpoint" 403
-
-    @amzlockretain header X-Amz-Object-Lock-Retain-Until-Date *
-    respond @amzlockretain "Object-lock headers are not allowed on the public endpoint" 403
-
-    @amzlockhold header X-Amz-Object-Lock-Legal-Hold *
-    respond @amzlockhold "Object-lock headers are not allowed on the public endpoint" 403
-
     reverse_proxy 100.x.y.z:5554 {
         header_up Host {http.request.hostport}
+        # Allowlist: strip every X-Amz-* request header so a presigned PUT can
+        # never become CopyObject/UploadPartCopy or an ACL/tagging/SSE operation.
+        header_up -X-Amz-*
     }
 }
 ```
@@ -151,8 +132,8 @@ sss3.example.com {
 The VPS Caddy only terminates public TLS and proxies. The home Caddy still
 handles CORS, so do not add a second `Access-Control-Allow-Origin` here; two
 values make browsers reject the response. The checked-in
-[Caddyfile.sss3](../Caddyfile.sss3) also blocks the copy headers. Caddy obtains
-the public certificate automatically once the DNS record and ports are correct.
+[Caddyfile.sss3](../Caddyfile.sss3) strips the same headers. Caddy obtains the
+public certificate automatically once the DNS record and ports are correct.
 
 Reload and test:
 
@@ -197,7 +178,7 @@ Important details:
 - `S3_ENDPOINT` is used by interim for `HeadObject`, `CopyObject`,
   `ListParts`, `ListObjectsV2`, and deletes. It must use the tailnet address or
   another direct/private route, never the public VPS Caddy. The public proxy
-  blocks `CopyObject`, which single-PUT completion needs for the staging-to-live
+  strips `X-Amz-Copy-Source`, so it cannot complete a single-PUT staging-to-live
   copy; multipart uses the staging key as the live object. If interim cannot
   reach the tailnet, place it on the tailnet or provide a private route.
 - If interim shares a Docker network with sss3, `S3_ENDPOINT` can instead be

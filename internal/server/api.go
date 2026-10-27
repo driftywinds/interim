@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"interim/internal/store"
 )
@@ -116,6 +117,18 @@ func (s *Server) writeAPIError(w http.ResponseWriter, r *http.Request, status in
 	})
 }
 
+func decodeJSONStrict(r io.Reader, dst any) error {
+	decoder := json.NewDecoder(r)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body contains trailing data")
+	}
+	return nil
+}
+
 func (s *Server) rawAPIKey(r *http.Request) (string, error) {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if auth != "" {
@@ -189,8 +202,7 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if r.ContentLength != 0 {
-		decoder := json.NewDecoder(r.Body)
-		if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		if err := decodeJSONStrict(r.Body, &request); err != nil && !errors.Is(err, io.EOF) {
 			s.writeAPIError(w, r, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
 			return
 		}
@@ -291,6 +303,11 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
+	if allowed, retry := s.limiter.allow("status:"+s.clientIP(r), 60, time.Minute); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		s.writeAPIError(w, r, http.StatusTooManyRequests, "rate_limited", "Too many status requests. Try again shortly.")
+		return
+	}
 	status, err := s.status(r.Context())
 	if err != nil {
 		s.logger.Error("api status", "error", err)
@@ -431,6 +448,11 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	if allowed, retry := s.limiter.allow("deletefile:"+s.clientIP(r)+":"+r.PathValue("id"), 30, 10*time.Minute); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		s.writeAPIError(w, r, http.StatusTooManyRequests, "rate_limited", "Too many delete attempts. Try again shortly.")
+		return
+	}
 	file, err := s.store.FileByID(r.Context(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -450,28 +472,30 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "A valid user hash is required.")
 		return
 	}
-	authorized := false
-	if key != nil {
-		if file.APIKeyID != nil && *file.APIKeyID == key.ID {
+	authorized := key != nil && file.APIKeyID != nil && *file.APIKeyID == key.ID
+	// The delete token remains valid even when the request also carries a
+	// non-owner user hash. Otherwise a browser with a saved hash could never
+	// delete an anonymous file it uploaded earlier.
+	if !authorized {
+		token := strings.TrimSpace(r.Header.Get("X-Delete-Token"))
+		if token != "" {
+			if len(token) > 256 || !hashEquals(tokenHash(token), file.DeleteTokenHash) {
+				if key != nil {
+					s.writeAPIError(w, r, http.StatusNotFound, "not_found", "File not found.")
+					return
+				}
+				s.writeAPIError(w, r, http.StatusForbidden, "forbidden", "The delete token is invalid.")
+				return
+			}
 			authorized = true
-		} else {
+		}
+	}
+	if !authorized {
+		if key != nil {
 			s.writeAPIError(w, r, http.StatusNotFound, "not_found", "File not found.")
 			return
 		}
-	} else {
-		token := strings.TrimSpace(r.Header.Get("X-Delete-Token"))
-		if token == "" {
-			s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "Provide a user hash or the file's delete token.")
-			return
-		}
-		if len(token) > 256 || !hashEquals(tokenHash(token), file.DeleteTokenHash) {
-			s.writeAPIError(w, r, http.StatusForbidden, "forbidden", "The delete token is invalid.")
-			return
-		}
-		authorized = true
-	}
-	if !authorized {
-		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "Not authorized to delete this file.")
+		s.writeAPIError(w, r, http.StatusUnauthorized, "unauthorized", "Provide a user hash or the file's delete token.")
 		return
 	}
 
@@ -498,7 +522,11 @@ func cleanLabel(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Map(stripFormattingRune, value)
 	if len(value) > 64 {
-		value = value[:64]
+		cut := 64
+		for cut > 0 && !utf8.RuneStart(value[cut]) {
+			cut--
+		}
+		value = value[:cut]
 	}
 	return value
 }

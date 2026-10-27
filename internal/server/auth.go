@@ -31,13 +31,24 @@ func (s *Server) adminSession(r *http.Request) (store.Session, bool) {
 	if err != nil || cookie.Value == "" {
 		return store.Session{}, false
 	}
-	session, err := s.store.SessionByTokenHash(r.Context(), tokenHash(cookie.Value), s.now())
+	now := s.now()
+	session, err := s.store.SessionByTokenHash(r.Context(), tokenHash(cookie.Value), now)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.logger.Warn("admin session lookup failed", "error", err)
 		}
 		return store.Session{}, false
 	}
+	if s.cfg.AdminIdleTimeout > 0 && now.Sub(session.LastSeenAt) > s.cfg.AdminIdleTimeout {
+		if err := s.store.DeleteSession(r.Context(), session.TokenHash); err != nil {
+			s.logger.Warn("delete idle admin session", "error", err)
+		}
+		return store.Session{}, false
+	}
+	if err := s.store.TouchSession(r.Context(), session.TokenHash, now); err != nil {
+		s.logger.Warn("touch admin session", "error", err)
+	}
+	session.LastSeenAt = now
 	return session, true
 }
 
@@ -199,7 +210,7 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rateKey := "setup:" + s.clientIP(r)
-	if allowed, retry := s.limiter.allow(rateKey, 5, 15*time.Minute); !allowed {
+	if allowed, retry := s.authLimiter.allow(rateKey, 5, 15*time.Minute); !allowed {
 		w.Header().Set("Retry-After", retryString(retry))
 		s.renderSetupError(w, r, http.StatusTooManyRequests, "Too many setup attempts. Try again later.")
 		return
@@ -220,8 +231,8 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case !usernamePattern.MatchString(username):
 		errorMessage = "Username must be 3–32 characters: letters, numbers, dots, underscores, or dashes."
-	case len(password) < 10:
-		errorMessage = "Password must be at least 10 characters."
+	case len(password) < 12:
+		errorMessage = "Password must be at least 12 characters."
 	case len([]byte(password)) > 72:
 		errorMessage = "Password must be at most 72 bytes."
 	case password != confirm:
@@ -261,7 +272,7 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
-	s.limiter.reset(rateKey)
+	s.authLimiter.reset(rateKey)
 	s.clearPreauthCSRF(w)
 	if s.cfg.SetupTokenPath != "" {
 		if err := os.Remove(s.cfg.SetupTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -320,7 +331,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rateKey := "login:" + s.clientIP(r)
-	if allowed, retry := s.limiter.allow(rateKey, loginRateLimit, loginRateWindow); !allowed {
+	if allowed, retry := s.authLimiter.allow(rateKey, loginRateLimit, loginRateWindow); !allowed {
 		w.Header().Set("Retry-After", retryString(retry))
 		w.Header().Set("Cache-Control", "no-store")
 		page := s.authPageData(r, "login")
@@ -340,6 +351,23 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	username := strings.TrimSpace(r.PostFormValue("username"))
 	password := r.PostFormValue("password")
+	// A second, fixed counter (not a map entry) slows a distributed
+	// brute-force attempt across rotated IPv4/IPv6 addresses. A flood of
+	// arbitrary limiter keys cannot evict it. There is one admin account, so
+	// counting all usernames together is equivalent to a per-account lockout.
+	if allowed, retry := s.loginAccountLimiter.allow(30, loginRateWindow); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		w.Header().Set("Cache-Control", "no-store")
+		page := s.authPageData(r, "login")
+		page.CSRF = s.preauthCSRF(w, r)
+		s.render(w, r, http.StatusTooManyRequests, "auth", AuthView{
+			PageData: page,
+			Mode:     "login",
+			Error:    "Too many attempts for this account. Try again later.",
+		})
+		return
+	}
+
 	admin, err := s.store.AdminByUsername(r.Context(), username)
 	hash := s.dummyHash
 	if err == nil {
@@ -347,7 +375,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	compareErr := bcrypt.CompareHashAndPassword(hash, []byte(password))
 	if err != nil || compareErr != nil {
-		s.logger.Warn("admin login failed", "username", username, "ip", s.clientIP(r))
+		s.logger.Warn("admin login failed", "username_hash", usernameLogValue(username), "ip", s.clientIP(r))
 		page := s.authPageData(r, "login")
 		page.CSRF = s.preauthCSRF(w, r)
 		view := AuthView{
@@ -365,7 +393,8 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Login failed", "Could not create a session.")
 		return
 	}
-	s.limiter.reset(rateKey)
+	s.authLimiter.reset(rateKey)
+	s.loginAccountLimiter.reset()
 	s.clearPreauthCSRF(w)
 	s.logger.Info("admin login", "username", admin.Username, "ip", s.clientIP(r))
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -387,6 +416,80 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
+func (s *Server) handleAdminPassword(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.adminSession(r)
+	if !ok {
+		s.redirectToLogin(w, r)
+		return
+	}
+	if !s.parseAdminForm(w, r) || !s.adminCSRFValid(r, session) {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid form", "The password form expired. Reload the page.")
+		return
+	}
+	current := r.PostFormValue("current_password")
+	password := r.PostFormValue("password")
+	confirm := r.PostFormValue("password_confirm")
+	if len(password) < 12 {
+		s.renderError(w, r, http.StatusUnprocessableEntity, "Password not changed", "The new password must be at least 12 characters.")
+		return
+	}
+	if len([]byte(password)) > 72 {
+		s.renderError(w, r, http.StatusUnprocessableEntity, "Password not changed", "The new password must be at most 72 bytes.")
+		return
+	}
+	if password != confirm {
+		s.renderError(w, r, http.StatusUnprocessableEntity, "Password not changed", "The new passwords do not match.")
+		return
+	}
+
+	admin, err := s.store.AdminByID(r.Context(), session.AdminID)
+	if err != nil {
+		s.logger.Error("read admin for password change", "error", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Password not changed", "Could not read the admin account.")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(current)); err != nil {
+		s.logger.Warn("admin password change rejected", "admin", admin.Username, "ip", s.clientIP(r))
+		s.renderError(w, r, http.StatusForbidden, "Password not changed", "The current password is incorrect.")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	if err != nil {
+		s.logger.Error("hash new admin password", "error", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Password not changed", "Could not secure the new password.")
+		return
+	}
+	if err := s.store.UpdateAdminPassword(r.Context(), admin.ID, string(hash)); err != nil {
+		s.logger.Error("update admin password", "error", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Password not changed", "Could not update the password.")
+		return
+	}
+	s.clearKeyFlash(w)
+	s.clearAdminCookie(w)
+	s.logger.Info("admin password changed; all sessions revoked", "admin", admin.Username, "ip", s.clientIP(r))
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
+func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.adminSession(r)
+	if !ok {
+		s.redirectToLogin(w, r)
+		return
+	}
+	if !s.parseAdminForm(w, r) || !s.adminCSRFValid(r, session) {
+		s.renderError(w, r, http.StatusBadRequest, "Invalid form", "The logout form expired. Reload the page.")
+		return
+	}
+	if err := s.store.DeleteSessionsForAdmin(r.Context(), session.AdminID); err != nil {
+		s.logger.Error("delete all admin sessions", "error", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Logout failed", "Could not revoke all sessions.")
+		return
+	}
+	s.clearKeyFlash(w)
+	s.clearAdminCookie(w)
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.writeAPIError(w, r, http.StatusNotFound, "not_found", "The requested API endpoint does not exist.")
@@ -397,4 +500,12 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 
 func retryString(d time.Duration) string {
 	return strconv.Itoa(retrySeconds(d))
+}
+
+// usernameLogValue keeps failed-login logs correlation-friendly without
+// recording whatever was typed. Users sometimes paste a password into the
+// username field.
+func usernameLogValue(username string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(username))))
+	return base64.RawURLEncoding.EncodeToString(sum[:8])
 }
