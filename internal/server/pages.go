@@ -85,6 +85,7 @@ func (s *Server) handlePageDownload(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusGone, "Expired", "This file has been permanently deleted.")
 		return
 	}
+	file = s.retainOnDownload(r.Context(), file)
 
 	url, _, err := s.downloadURL(r.Context(), file)
 	if err != nil {

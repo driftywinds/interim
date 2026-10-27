@@ -53,6 +53,7 @@ type Config struct {
 	LogLevel              string
 
 	Retention                  time.Duration
+	ExtendRetentionOnDownload  bool
 	MaxStorage                 int64
 	MaxFileSize                int64
 	DownloadTTL                time.Duration
@@ -205,6 +206,10 @@ func Load() (Config, error) {
 	if retention < time.Hour || retention > 10*365*24*time.Hour {
 		return Config{}, errors.New("RETENTION must be between 1h and 3650d")
 	}
+	extendRetentionOnDownload, err := parseBool("RETENTION_EXTEND_ON_DOWNLOAD", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	downloadTTL, err := parseDuration("DOWNLOAD_URL_TTL", "5m")
 	if err != nil {
@@ -318,6 +323,7 @@ func Load() (Config, error) {
 		SetupTokenPath:             setupTokenPath,
 		LogLevel:                   logLevel,
 		Retention:                  retention,
+		ExtendRetentionOnDownload:  extendRetentionOnDownload,
 		MaxStorage:                 maxStorage,
 		MaxFileSize:                maxFileSize,
 		DownloadTTL:                downloadTTL,

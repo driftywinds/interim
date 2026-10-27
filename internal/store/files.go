@@ -14,7 +14,7 @@ var (
 )
 
 const fileColumns = `f.id, f.object_key, f.api_key_id, f.original_name, f.content_type,
-	f.size, f.delete_token_hash, f.created_at, f.expires_at`
+	f.size, f.delete_token_hash, f.created_at, f.expires_at, f.deleting_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -24,9 +24,10 @@ func scanFile(scanner rowScanner) (File, error) {
 	var file File
 	var apiKeyID sql.NullString
 	var created, expires int64
+	var deleting sql.NullInt64
 	err := scanner.Scan(
 		&file.ID, &file.ObjectKey, &apiKeyID, &file.OriginalName, &file.ContentType,
-		&file.Size, &file.DeleteTokenHash, &created, &expires,
+		&file.Size, &file.DeleteTokenHash, &created, &expires, &deleting,
 	)
 	if err != nil {
 		return File{}, err
@@ -36,6 +37,7 @@ func scanFile(scanner rowScanner) (File, error) {
 	}
 	file.CreatedAt = scanTime(created)
 	file.ExpiresAt = scanTime(expires)
+	file.DeletingAt = nullableUnix(deleting)
 	return file, nil
 }
 
@@ -117,6 +119,76 @@ func (s *Store) FileByID(ctx context.Context, id string) (File, error) {
 	return file, nil
 }
 
+// ExtendFileExpiry moves a file's expiry forward. The UPDATE only matches a
+// row that is still live and would actually move later, so a download racing
+// the janitor cannot resurrect an expired file, shorten a longer deadline, or
+// extend a file whose object deletion is already in progress.
+func (s *Store) ExtendFileExpiry(ctx context.Context, id string, now, expiresAt time.Time) (bool, error) {
+	if !expiresAt.After(now) {
+		return false, nil
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE files SET expires_at = ?
+		 WHERE id = ? AND expires_at > ? AND expires_at < ? AND deleting_at IS NULL`,
+		toUnix(expiresAt), id, toUnix(now), toUnix(expiresAt),
+	)
+	if err != nil {
+		return false, fmt.Errorf("extend file expiry: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("extend file expiry rows: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// ClaimExpiredFile marks an expired file as being deleted. The conditional
+// UPDATE is the race guard: a download can extend the expiry only while
+// deleting_at is NULL, and the janitor can claim only a row that is still
+// expired. Whoever updates first wins, so the object is never deleted out from
+// under a file that was just extended.
+func (s *Store) ClaimExpiredFile(ctx context.Context, id string, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE files SET deleting_at = ?
+		 WHERE id = ? AND expires_at <= ? AND deleting_at IS NULL`,
+		toUnix(now), id, toUnix(now),
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim expired file: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim expired file rows: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// FinishFileDeletion removes a claimed row after its object is gone.
+func (s *Store) FinishFileDeletion(ctx context.Context, id string) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		"DELETE FROM files WHERE id = ? AND deleting_at IS NOT NULL", id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("finish file deletion: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("finish file deletion rows: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// ReleaseFileDeletion clears a claim after a failed object delete so the
+// janitor retries on its next pass.
+func (s *Store) ReleaseFileDeletion(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE files SET deleting_at = NULL WHERE id = ?", id,
+	); err != nil {
+		return fmt.Errorf("release file deletion: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteFileRow(ctx context.Context, id string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM files WHERE id = ?", id)
 	if err != nil {
@@ -129,26 +201,12 @@ func (s *Store) DeleteFileRow(ctx context.Context, id string) (bool, error) {
 	return affected == 1, nil
 }
 
-func (s *Store) DeleteExpiredFileRow(ctx context.Context, id string, now time.Time) (bool, error) {
-	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM files WHERE id = ? AND expires_at <= ?", id, toUnix(now),
-	)
-	if err != nil {
-		return false, fmt.Errorf("delete expired file row: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("delete expired file row count: %w", err)
-	}
-	return affected == 1, nil
-}
-
 func (s *Store) ExpiredFiles(ctx context.Context, now time.Time, limit int) ([]File, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+fileColumns+" FROM files f WHERE f.expires_at <= ? ORDER BY f.expires_at ASC LIMIT ?",
+		"SELECT "+fileColumns+" FROM files f WHERE f.expires_at <= ? AND f.deleting_at IS NULL ORDER BY f.expires_at ASC LIMIT ?",
 		toUnix(now), limit,
 	)
 	if err != nil {
@@ -219,10 +277,11 @@ func (s *Store) ListFilesAdmin(ctx context.Context, filter FileFilter) ([]AdminF
 		var adminFile AdminFile
 		var apiKeyID sql.NullString
 		var created, expires int64
+		var deleting sql.NullInt64
 		if err := rows.Scan(
 			&adminFile.ID, &adminFile.ObjectKey, &apiKeyID, &adminFile.OriginalName,
 			&adminFile.ContentType, &adminFile.Size, &adminFile.DeleteTokenHash,
-			&created, &expires, &adminFile.KeyPrefix, &adminFile.KeyName,
+			&created, &expires, &deleting, &adminFile.KeyPrefix, &adminFile.KeyName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan admin file: %w", err)
 		}
@@ -231,6 +290,7 @@ func (s *Store) ListFilesAdmin(ctx context.Context, filter FileFilter) ([]AdminF
 		}
 		adminFile.CreatedAt = scanTime(created)
 		adminFile.ExpiresAt = scanTime(expires)
+		adminFile.DeletingAt = nullableUnix(deleting)
 		files = append(files, adminFile)
 	}
 	if err := rows.Err(); err != nil {

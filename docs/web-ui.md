@@ -20,7 +20,9 @@ browser storage like the delete token.
 Completed uploads are stored in `localStorage` under `interim.uploads.v1`,
 including the per-file delete token. Only that browser can see the list.
 Clearing site data loses the local delete ability, but the file still expires
-after the configured `RETENTION` period and the admin can delete it.
+after the configured `RETENTION` period (or, when
+`RETENTION_EXTEND_ON_DOWNLOAD=true`, after `RETENTION` from the last download)
+and the admin can delete it.
 
 When `PUBLIC_UPLOADS_ENABLED=false`, the home page asks for an admin-issued
 user hash. It validates the hash with `GET /api/v1/keys/me`, requires

@@ -34,8 +34,34 @@ WAF/rate-limit concern.
 `RETENTION` is read from the environment when the process starts. Each committed
 file gets an expiry of `completed_at + RETENTION`; changing the value applies to
 new uploads, not existing rows. Expired file pages return HTTP `410`,
-metadata/download endpoints refuse them, and a worker deletes the S3 object
-before removing the SQLite row.
+metadata/download endpoints refuse them, and a worker claims the SQLite row,
+deletes the S3 object, then removes the row. A failed object delete releases the
+claim so the next janitor pass retries.
+
+### Sliding retention from the last download
+
+Set `RETENTION_EXTEND_ON_DOWNLOAD=true` to make retention relative to the last
+download instead of upload time. Every successful `GET /f/{id}/download` or
+`POST /api/v1/files/{id}/download` moves `expires_at` to `now + RETENTION`.
+There is no separate download record; the new expiry is the last-download
+timestamp. Existing files keep their current expiry until their next download.
+
+Downloads go directly from the browser to storage, so interim never sees the
+bytes arrive. The extension is triggered when interim issues the signed link,
+which means a link prefetch or an abandoned download extends the file just like
+a completed one. Two consequences are worth planning for:
+
+- A client can keep its own file alive indefinitely by downloading it before
+  each deadline. That is the intended Buzzheavier-style behavior; `MAX_STORAGE`
+  and `MAX_FILES` still cap the instance as a whole.
+- The file page countdown reflects the expiry at render time. A download
+  triggered from that page extends the stored deadline, but the already-rendered
+  countdown does not change until the page is refreshed.
+
+The janitor still deletes the object once the refreshed deadline passes. It
+claims the expired row before deleting the object, and the same claim blocks a
+concurrent extension, so a download that races the janitor cannot leave a live
+row pointing at missing bytes or lose a file that was just extended.
 
 ## Upload intents and the janitor
 

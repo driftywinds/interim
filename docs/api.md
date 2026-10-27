@@ -90,6 +90,9 @@ reload.
 | `DELETE` | `/api/v1/files/{id}` | bearer or token | Delete. |
 | `GET` | `/api/v1/status` | no | Capacity and retention status. |
 
+`GET /api/v1/status` also reports `retention_extend_on_download`, so clients can
+tell whether each download-link request slides the file expiry.
+
 Rate limits apply to user-hash creation, upload-intent creation, download-link
 creation, and admin login. Errors use
 `{"error":{"code","message","request_id"}}`.

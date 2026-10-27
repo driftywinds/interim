@@ -217,17 +217,43 @@ func (s *Server) cookieName(base string) string {
 }
 
 func (s *Server) basePage(r *http.Request, title, active string) PageData {
-	return PageData{
-		Title:          title,
-		Active:         active,
-		BaseURL:        s.cfg.PublicBaseURL,
-		RetentionLabel: retentionLabel(s.cfg.Retention),
-		MaxFileSize:    s.cfg.MaxFileSize,
-		MaxStorage:     s.cfg.MaxStorage,
-		DownloadTTL:    s.cfg.DownloadTTL,
-		CurrentPath:    r.URL.Path,
-		AssetVersion:   s.assetVersion,
+	rule := "after " + retentionLabel(s.cfg.Retention)
+	if s.cfg.ExtendRetentionOnDownload {
+		rule = retentionLabel(s.cfg.Retention) + " after the last download"
 	}
+	return PageData{
+		Title:                     title,
+		Active:                    active,
+		BaseURL:                   s.cfg.PublicBaseURL,
+		RetentionLabel:            retentionLabel(s.cfg.Retention),
+		RetentionRule:             rule,
+		ExtendRetentionOnDownload: s.cfg.ExtendRetentionOnDownload,
+		MaxFileSize:               s.cfg.MaxFileSize,
+		MaxStorage:                s.cfg.MaxStorage,
+		DownloadTTL:               s.cfg.DownloadTTL,
+		CurrentPath:               r.URL.Path,
+		AssetVersion:              s.assetVersion,
+	}
+}
+
+// retainOnDownload refreshes a live file's expiry when interim issues a
+// download link. Downloads go straight from the browser to storage, so this is
+// the last point where interim can observe the download.
+func (s *Server) retainOnDownload(ctx context.Context, file store.File) store.File {
+	if !s.cfg.ExtendRetentionOnDownload || s.cfg.Retention <= 0 {
+		return file
+	}
+	now := s.now().UTC().Truncate(time.Second)
+	expiresAt := now.Add(s.cfg.Retention)
+	extended, err := s.store.ExtendFileExpiry(ctx, file.ID, now, expiresAt)
+	if err != nil {
+		s.logger.Error("extend file retention on download", "file_id", file.ID, "error", err)
+		return file
+	}
+	if extended {
+		file.ExpiresAt = expiresAt
+	}
+	return file
 }
 
 func (s *Server) downloadURL(ctx context.Context, file store.File) (string, time.Time, error) {

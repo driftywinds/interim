@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{if .Title}}{{.Title}} · interim{{else}}interim{{end}}</title>
-    <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Temporary file hosting. Every file is deleted after {{.RetentionLabel}}.{{end}}">
+    <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Temporary file hosting. Every file is deleted {{.RetentionRule}}.{{end}}">
     <meta name="application-name" content="interim">
     {{if .NoIndex}}<meta name="robots" content="noindex,nofollow">{{end}}
     <link rel="icon" href="/static/favicon.svg?v={{.AssetVersion}}" type="image/svg+xml">
@@ -14,7 +14,7 @@
 <body data-page="{{.Active}}">
 <header class="site-head">
     <h1 class="brand"><a href="/">interim</a></h1>
-    <p class="tagline">Temporary file hosting. Every file is deleted after {{.RetentionLabel}}.</p>
+    <p class="tagline">Temporary file hosting. Every file is deleted {{.RetentionRule}}.</p>
     <nav class="navbar" aria-label="Main navigation">
         <ul>
             <li>{{if eq .Active "home"}}<span>Index</span>{{else}}<a href="/">Index</a>{{end}}</li>
@@ -29,7 +29,7 @@
 </main>
 
 <footer class="site-foot">
-    <p><strong>interim</strong> — no accounts, no permanence. Files are permanently deleted after {{.RetentionLabel}}.</p>
+    <p><strong>interim</strong> — no accounts, no permanence. Files are permanently deleted {{.RetentionRule}}.</p>
     <p><a href="/api">API documentation</a></p>
 </footer>
 

@@ -5,7 +5,7 @@
         <p class="file-meta">{{bytes .Size}} · uploaded {{date .CreatedAt}} · expired {{datetime .ExpiresAt}}</p>
         <div class="warn">
             <p class="lede">Whatever lived here has returned to the void.</p>
-            <p>This file was permanently deleted after {{.RetentionLabel}}. There is no recovery, no backup, and no point in refreshing.</p>
+            <p>This file was permanently deleted {{.RetentionRule}}. There is no recovery, no backup, and no point in refreshing.</p>
         </div>
         <p class="download-back"><a href="/">Upload a new file</a></p>
     {{else}}
@@ -26,7 +26,8 @@
             <p class="lede">All downloads happen from this page.</p>
             <p>There are no direct object URLs and no permanent links. If a link works after {{.DownloadTTL}}, it did not come from us.</p>
             <ul>
-                <li>The file is deleted automatically after {{.RetentionLabel}}.</li>
+                <li>The file is deleted automatically {{.RetentionRule}}.</li>
+                {{if .ExtendRetentionOnDownload}}<li>Each download extends the deadline to {{.RetentionLabel}} from that download.</li>{{end}}
                 <li>If you need it later, download it now.</li>
                 <li>Links are generated per click and expire quickly.</li>
             </ul>

@@ -130,3 +130,52 @@ func TestOpenMigratesLegacyAPIKeysAsUnapproved(t *testing.T) {
 		t.Fatalf("legacy upload parts = %+v, %v", parts, err)
 	}
 }
+
+func TestFileDeletionClaimBlocksExtension(t *testing.T) {
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "claim.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	expiry := now.Add(time.Hour)
+	if _, err := st.db.ExecContext(context.Background(),
+		`INSERT INTO files
+		 (id, object_key, original_name, content_type, size, delete_token_hash, created_at, expires_at)
+		 VALUES ('claimed', 'files/claimed', 'claimed.bin', 'application/octet-stream', 1, X'00', ?, ?)`,
+		toUnix(now), toUnix(expiry),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Claim the row as the janitor would after the deadline.
+	claimed, err := st.ClaimExpiredFile(context.Background(), "claimed", expiry.Add(time.Minute))
+	if err != nil || !claimed {
+		t.Fatalf("ClaimExpiredFile = %v, %v", claimed, err)
+	}
+	// Moving the expiry back before the claim deadline must not bypass the
+	// deleting_at guard.
+	extended, err := st.ExtendFileExpiry(context.Background(), "claimed", now, now.Add(2*time.Hour))
+	if err != nil || extended {
+		t.Fatalf("ExtendFileExpiry on claimed file = %v, %v", extended, err)
+	}
+	file, err := st.FileByID(context.Background(), "claimed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.DeletingAt == nil {
+		t.Fatal("claimed file has no deleting_at marker")
+	}
+
+	if err := st.ReleaseFileDeletion(context.Background(), "claimed"); err != nil {
+		t.Fatal(err)
+	}
+	extended, err = st.ExtendFileExpiry(context.Background(), "claimed", now, now.Add(2*time.Hour))
+	if err != nil || !extended {
+		t.Fatalf("ExtendFileExpiry after release = %v, %v", extended, err)
+	}
+	if removed, err := st.FinishFileDeletion(context.Background(), "claimed"); err != nil || removed {
+		t.Fatalf("FinishFileDeletion without a claim = %v, %v", removed, err)
+	}
+}

@@ -1508,6 +1508,104 @@ func TestUploadUsesConfiguredRetention(t *testing.T) {
 	}
 }
 
+func TestSlidingRetentionOnDownload(t *testing.T) {
+	t.Run("enabled", func(t *testing.T) {
+		env := newTestEnv(t, 20<<20, 5<<20)
+		env.server.cfg.Retention = 2 * time.Hour
+		env.server.cfg.ExtendRetentionOnDownload = true
+
+		result := env.upload(t, "", "sliding.txt", []byte("keep me"))
+		if result.Status != http.StatusCreated {
+			t.Fatalf("upload status = %d: %s", result.Status, result.Body)
+		}
+		before, err := env.store.FileByID(context.Background(), result.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		later := before.CreatedAt.Add(90 * time.Minute)
+		env.server.now = func() time.Time { return later }
+
+		response, err := env.client.Get(env.http.URL + "/f/" + result.ID + "/download")
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusSeeOther {
+			t.Fatalf("page download status = %d", response.StatusCode)
+		}
+
+		after, err := env.store.FileByID(context.Background(), result.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := later.Add(2 * time.Hour)
+		if !after.ExpiresAt.Equal(want) {
+			t.Fatalf("expiry after download = %v, want %v", after.ExpiresAt, want)
+		}
+		if !after.ExpiresAt.After(before.ExpiresAt) {
+			t.Fatalf("download did not extend expiry: before=%v after=%v", before.ExpiresAt, after.ExpiresAt)
+		}
+
+		// The original deadline is now in the past, but the extended one is not.
+		// The janitor must keep the row and object.
+		env.server.now = func() time.Time { return after.ExpiresAt.Add(-time.Minute) }
+		env.server.MaintenanceOnce(context.Background())
+		if _, err := env.store.FileByID(context.Background(), result.ID); err != nil {
+			t.Fatalf("janitor removed an extended file: %v", err)
+		}
+		if !env.fake.exists(before.ObjectKey) {
+			t.Fatal("janitor removed the extended file's object")
+		}
+
+		env.server.now = func() time.Time { return after.ExpiresAt.Add(time.Minute) }
+		env.server.MaintenanceOnce(context.Background())
+		if _, err := env.store.FileByID(context.Background(), result.ID); err == nil {
+			t.Fatal("janitor did not delete the file at the extended deadline")
+		}
+		if env.fake.exists(before.ObjectKey) {
+			t.Fatal("janitor did not delete the object at the extended deadline")
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		env := newTestEnv(t, 20<<20, 5<<20)
+		env.server.cfg.Retention = 2 * time.Hour
+
+		result := env.upload(t, "", "fixed.txt", []byte("stay put"))
+		if result.Status != http.StatusCreated {
+			t.Fatalf("upload status = %d: %s", result.Status, result.Body)
+		}
+		before, err := env.store.FileByID(context.Background(), result.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		env.server.now = func() time.Time { return before.CreatedAt.Add(90 * time.Minute) }
+
+		request, err := http.NewRequest(http.MethodPost, env.http.URL+"/api/v1/files/"+result.ID+"/download", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := env.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("API download status = %d", response.StatusCode)
+		}
+
+		after, err := env.store.FileByID(context.Background(), result.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !after.ExpiresAt.Equal(before.ExpiresAt) {
+			t.Fatalf("expiry changed with sliding retention disabled: before=%v after=%v", before.ExpiresAt, after.ExpiresAt)
+		}
+	})
+}
+
 func TestOwnershipAndStorageQuota(t *testing.T) {
 	env := newTestEnv(t, 100, 100)
 	_, hashA := env.createKey(t)

@@ -18,11 +18,14 @@ type PageData struct {
 	Wide           bool
 	NoIndex        bool
 	RetentionLabel string
-	MaxFileSize    int64
-	MaxStorage     int64
-	DownloadTTL    time.Duration
-	CurrentPath    string
-	AssetVersion   string
+	RetentionRule  string
+	// ExtendRetentionOnDownload tells templates to describe sliding retention.
+	ExtendRetentionOnDownload bool
+	MaxFileSize               int64
+	MaxStorage                int64
+	DownloadTTL               time.Duration
+	CurrentPath               string
+	AssetVersion              string
 }
 
 type StatusView struct {

@@ -44,6 +44,7 @@ type File struct {
 	DeleteTokenHash []byte
 	CreatedAt       time.Time
 	ExpiresAt       time.Time
+	DeletingAt      *time.Time
 }
 
 type AdminFile struct {

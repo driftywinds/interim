@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS files (
     size              INTEGER NOT NULL CHECK (size > 0),
     delete_token_hash BLOB NOT NULL,
     created_at        INTEGER NOT NULL,
-    expires_at        INTEGER NOT NULL
+    expires_at        INTEGER NOT NULL,
+    deleting_at       INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS files_expires_at ON files(expires_at);

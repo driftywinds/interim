@@ -70,14 +70,15 @@ type storageDTO struct {
 }
 
 type statusDTO struct {
-	AcceptingUploads bool       `json:"accepting_uploads"`
-	PublicUploads    bool       `json:"public_uploads"`
-	Storage          storageDTO `json:"storage"`
-	RetentionSeconds int64      `json:"retention_seconds"`
-	RetentionHuman   string     `json:"retention_human"`
-	MaxFileSize      int64      `json:"max_file_size_bytes"`
-	DownloadURLTTL   int64      `json:"download_url_ttl_seconds"`
-	ServerTime       time.Time  `json:"server_time"`
+	AcceptingUploads          bool       `json:"accepting_uploads"`
+	PublicUploads             bool       `json:"public_uploads"`
+	Storage                   storageDTO `json:"storage"`
+	RetentionSeconds          int64      `json:"retention_seconds"`
+	RetentionHuman            string     `json:"retention_human"`
+	RetentionExtendOnDownload bool       `json:"retention_extend_on_download"`
+	MaxFileSize               int64      `json:"max_file_size_bytes"`
+	DownloadURLTTL            int64      `json:"download_url_ttl_seconds"`
+	ServerTime                time.Time  `json:"server_time"`
 }
 
 type downloadDTO struct {
@@ -277,13 +278,14 @@ func (s *Server) handleKeyInfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"name":              "interim",
-		"version":           "v1",
-		"docs":              s.cfg.PublicBaseURL + "/api",
-		"openapi":           s.cfg.PublicBaseURL + "/api/openapi.json",
-		"retention_seconds": int64(s.cfg.Retention.Seconds()),
-		"retention_human":   retentionLabel(s.cfg.Retention),
-		"public_uploads":    s.cfg.PublicUploadsEnabled,
+		"name":                         "interim",
+		"version":                      "v1",
+		"docs":                         s.cfg.PublicBaseURL + "/api",
+		"openapi":                      s.cfg.PublicBaseURL + "/api/openapi.json",
+		"retention_seconds":            int64(s.cfg.Retention.Seconds()),
+		"retention_human":              retentionLabel(s.cfg.Retention),
+		"retention_extend_on_download": s.cfg.ExtendRetentionOnDownload,
+		"public_uploads":               s.cfg.PublicUploadsEnabled,
 		"endpoints": map[string]string{
 			"status":             "/api/v1/status",
 			"create_user_hash":   "/api/v1/keys",
@@ -326,11 +328,12 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 			UsedPercent:    status.UsedPercent,
 			Unlimited:      status.Unlimited,
 		},
-		RetentionSeconds: int64(s.cfg.Retention.Seconds()),
-		RetentionHuman:   retentionLabel(s.cfg.Retention),
-		MaxFileSize:      s.cfg.MaxFileSize,
-		DownloadURLTTL:   int64(s.cfg.DownloadTTL.Seconds()),
-		ServerTime:       s.now().UTC(),
+		RetentionSeconds:          int64(s.cfg.Retention.Seconds()),
+		RetentionHuman:            retentionLabel(s.cfg.Retention),
+		RetentionExtendOnDownload: s.cfg.ExtendRetentionOnDownload,
+		MaxFileSize:               s.cfg.MaxFileSize,
+		DownloadURLTTL:            int64(s.cfg.DownloadTTL.Seconds()),
+		ServerTime:                s.now().UTC(),
 	})
 }
 
@@ -433,6 +436,7 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, r, http.StatusGone, "expired", "This file has expired and is being deleted.")
 		return
 	}
+	file = s.retainOnDownload(r.Context(), file)
 
 	url, expires, err := s.downloadURL(r.Context(), file)
 	if err != nil {

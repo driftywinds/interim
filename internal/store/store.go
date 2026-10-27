@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 6"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 7"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -94,6 +94,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := ensureColumn(ctx, db, "upload_intents", "part_count",
 		`ALTER TABLE upload_intents ADD COLUMN part_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "files", "deleting_at",
+		`ALTER TABLE files ADD COLUMN deleting_at INTEGER`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx,
@@ -142,6 +146,12 @@ func (s *Store) Close() error {
 // Pending upload intents and their reservations are persisted because the
 // browser may already have uploaded an object; the janitor reconciles them.
 func (s *Store) ResetForStartup(ctx context.Context) error {
+	// A deletion claim only protects the brief object-delete window. After a
+	// restart no deletion is in flight, so clear stale claims and let the
+	// janitor retry. S3 deletes are idempotent.
+	if _, err := s.db.ExecContext(ctx, "UPDATE files SET deleting_at = NULL"); err != nil {
+		return fmt.Errorf("clear interrupted file deletions: %w", err)
+	}
 	if _, err := s.CleanOrphanReservations(ctx); err != nil {
 		return err
 	}

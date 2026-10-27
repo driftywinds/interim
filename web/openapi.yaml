@@ -4,7 +4,8 @@ info:
   version: 2.2.0
   description: |
     interim is a temporary file host. Files expire after the instance's
-    configured retention period (7 days by default). Uploads are direct to
+    configured retention period (7 days by default), or from the last download
+    when sliding retention is enabled. Uploads are direct to
     S3-compatible storage: interim reserves quota and signs a short-lived PUT
     URL, the client uploads the bytes, then interim verifies the object and
     commits the file record. Download URLs are short-lived: either signed S3
@@ -762,7 +763,7 @@ components:
           type: boolean
     Status:
       type: object
-      required: [accepting_uploads, public_uploads, storage, retention_seconds, retention_human, max_file_size_bytes, download_url_ttl_seconds, server_time]
+      required: [accepting_uploads, public_uploads, storage, retention_seconds, retention_human, retention_extend_on_download, max_file_size_bytes, download_url_ttl_seconds, server_time]
       properties:
         accepting_uploads:
           type: boolean
@@ -800,6 +801,9 @@ components:
           format: int64
         retention_human:
           type: string
+        retention_extend_on_download:
+          type: boolean
+          description: True when each download-link request resets the file expiry to retention_seconds from that moment.
         max_file_size_bytes:
           type: integer
           format: int64

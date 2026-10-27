@@ -3,8 +3,9 @@
 Temporary file hosting on S3-compatible storage. Uploads are public by default
 and can be locked down to admin-approved user hashes with
 `PUBLIC_UPLOADS_ENABLED=false`. Every file expires after the configured
-`RETENTION` period (7 days by default), and downloads are served through
-short-lived URLs from a private bucket.
+`RETENTION` period (7 days by default), optionally sliding from the last
+download, and downloads are served through short-lived URLs from a private
+bucket.
 
 Built in Go with SQLite metadata, a server-rendered web UI, a full REST API, and
 Docker as the primary deployment target.
@@ -17,7 +18,8 @@ Docker as the primary deployment target.
 - Optional S3 multipart uploads with configurable part size and resumable
   browser sessions for large files.
 - Private bucket downloads with expiring signed or Worker-proxied URLs.
-- Configurable retention, per-file limits, and total storage caps.
+- Configurable retention, optionally extended on every download, plus per-file
+  limits and total storage caps.
 - First-run admin setup, file management, and a background janitor.
 
 ## Quick start

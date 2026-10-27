@@ -42,7 +42,8 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | `MAX_STORAGE` | no | `20GB` | Hard total cap, binary units. Set to `0` or `unlimited` to disable the global cap. |
 | `MAX_FILE_SIZE` | no | `5GB` | Hard per-file cap. Cannot exceed `MAX_STORAGE` when a cap is set. Files above 5GB require multipart uploads. |
 | `MAX_FILES` | no | `100000` | Global committed-file count cap. `0` disables. |
-| `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry. |
+| `RETENTION` | no | `7d` | File lifetime. Supports `7d`, `30d`, `1.5d`, or Go durations like `12h`. 1h–3650d. Existing files keep their original expiry until their next download when sliding retention is enabled. |
+| `RETENTION_EXTEND_ON_DOWNLOAD` | no | `false` | Slide retention from the last download: each download-link request moves the file expiry to `now + RETENTION`. Downloads bypass interim, so the extension is triggered when the link is issued. |
 | `DOWNLOAD_URL_TTL` | no | `5m` | 30s–1h. Also the worker download token lifetime. |
 | `DOWNLOAD_WORKER_ENABLED` | no | `false` | Use Cloudflare Worker download URLs instead of presigned S3 GETs. |
 | `DOWNLOAD_WORKER_URLS` | worker mode yes | — | Comma/space-separated HTTPS worker base URLs. The `/d/<token>` path is appended. |

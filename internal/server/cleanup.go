@@ -174,19 +174,40 @@ func (s *Server) cleanupExpiredFiles(ctx context.Context) (int, error) {
 	deleted := 0
 	var firstErr error
 	for _, file := range files {
-		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := s.objects.Delete(deleteCtx, file.ObjectKey)
-		cancel()
+		// Claim the expired row before touching the object. ClaimExpiredFile
+		// only succeeds while deleting_at is NULL and the row is still expired;
+		// a concurrent download extension makes the claim lose, so the object
+		// is left alone.
+		claimed, err := s.store.ClaimExpiredFile(ctx, file.ID, s.now())
 		if err != nil {
-			s.logger.Error("delete expired object", "file_id", file.ID, "error", err)
+			s.logger.Error("claim expired file", "file_id", file.ID, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		removed, err := s.store.DeleteExpiredFileRow(ctx, file.ID, s.now())
+		if !claimed {
+			continue
+		}
+		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = s.objects.Delete(deleteCtx, file.ObjectKey)
+		cancel()
 		if err != nil {
-			s.logger.Error("delete expired file row", "file_id", file.ID, "error", err)
+			s.logger.Error("delete expired object", "file_id", file.ID, "key", file.ObjectKey, "error", err)
+			if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
+				s.logger.Error("release expired file claim", "file_id", file.ID, "error", releaseErr)
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed, err := s.store.FinishFileDeletion(ctx, file.ID)
+		if err != nil {
+			s.logger.Error("finish expired file deletion", "file_id", file.ID, "error", err)
+			if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
+				s.logger.Error("release expired file claim", "file_id", file.ID, "error", releaseErr)
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

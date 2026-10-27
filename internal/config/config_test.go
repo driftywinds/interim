@@ -42,6 +42,9 @@ func TestLoad(t *testing.T) {
 	if cfg.Retention != 7*24*time.Hour {
 		t.Errorf("retention = %v", cfg.Retention)
 	}
+	if cfg.ExtendRetentionOnDownload {
+		t.Error("RETENTION_EXTEND_ON_DOWNLOAD should default to false")
+	}
 	if cfg.UploadURLTTL != 30*time.Minute || cfg.UploadIntentTTL != 45*time.Minute {
 		t.Errorf("upload TTLs = %v / %v", cfg.UploadURLTTL, cfg.UploadIntentTTL)
 	}
@@ -325,6 +328,18 @@ func TestRetentionFormats(t *testing.T) {
 	}
 }
 
+func TestRetentionExtendOnDownload(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("RETENTION_EXTEND_ON_DOWNLOAD", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.ExtendRetentionOnDownload {
+		t.Fatal("RETENTION_EXTEND_ON_DOWNLOAD=true was not applied")
+	}
+}
+
 func TestLoadRejectsBadValues(t *testing.T) {
 	tests := map[string]string{
 		"PUBLIC_BASE_URL":                "",
@@ -333,6 +348,7 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		"S3_BUCKET":                      "",
 		"COOKIE_SECURE":                  "sometimes",
 		"PUBLIC_UPLOADS_ENABLED":         "sometimes",
+		"RETENTION_EXTEND_ON_DOWNLOAD":   "sometimes",
 		"MAX_FILES":                      "many",
 		"MAX_PENDING_UPLOADS_PER_CLIENT": "many",
 		"MAX_RESERVED_BYTES_PER_CLIENT":  "nope",
