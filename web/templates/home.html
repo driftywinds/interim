@@ -6,7 +6,7 @@
     <p class="muted">Admin-issued user hashes can have custom file-size and retention limits.</p>
     {{if .DonationURL}}
     <p class="storage-donate">
-        {{if .Status.Unlimited}}Want to support development?{{else}}Want to support development and increase this limit?{{end}}
+        {{if .Status.Unlimited}}Want to support development and increase this limit?{{else}}Want to support development and increase this limit?{{end}}
         <a href="{{.DonationURL}}" target="_blank" rel="noopener noreferrer">Donate here</a>
     </p>
     {{end}}
@@ -60,7 +60,7 @@
 
 <section id="resume-uploads" class="history" hidden>
     <h2>Interrupted uploads</h2>
-    <p class="muted">Multipart uploads are resumable while the upload intent is still valid. Select the same file above to continue from the completed parts.</p>
+    <p class="muted">Multipart uploads are resumable for a while if interrupted. Select the same file above to continue from where you left off.</p>
     <ul id="resume-list" class="resume-list"></ul>
 </section>
 
