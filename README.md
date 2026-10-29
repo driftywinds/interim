@@ -85,4 +85,4 @@ the test coverage and direct-build command.
 
 GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
 
-Copyright (C) 2026 interim contributors.
+Copyright (C) 2026 driftywinds
