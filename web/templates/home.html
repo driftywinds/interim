@@ -4,10 +4,12 @@
 <div class="expiry-notice" role="note">
     <strong>Every file is permanently deleted {{.RetentionRule}} by default.</strong>
     <p class="muted">Admin-issued user hashes can have custom file-size and retention limits.</p>
+    {{if .DonationURL}}
     <p class="storage-donate">
         {{if .Status.Unlimited}}Want to support development?{{else}}Want to support development and increase this limit?{{end}}
-        <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
+        <a href="{{.DonationURL}}" target="_blank" rel="noopener noreferrer">Donate here</a>
     </p>
+    {{end}}
 </div>
 
 {{if not .Status.Unlimited}}
@@ -27,7 +29,7 @@
 
     <section id="upload-gate" class="upload-gate" aria-labelledby="upload-gate-title"{{if .Status.PublicUploads}} hidden{{end}}>
         <h2 id="upload-gate-title">Restricted uploads</h2>
-        <p>This instance only accepts uploads from approved user hashes. Enter the user hash the admin gave you. It will be saved in this browser. Email drifty at interim@drifty.win for access.</p>
+        <p>This instance only accepts uploads from approved user hashes. Enter the user hash the admin gave you. It will be saved in this browser. {{if .ContactEmail}}Email <a href="mailto:{{.ContactEmail}}">{{.ContactEmail}}</a> for access.{{else}}Ask the admin for access.{{end}}</p>
         <form id="upload-hash-form" method="post" action="/">
             <label for="upload-hash">User hash</label>
             <input type="password" id="upload-hash" name="user_hash" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" required>
@@ -70,13 +72,14 @@
         <span class="muted">(<span id="storage-percent">{{pct .Status.UsedPercent}}</span>%)</span>
     </p>
     <progress id="storage-progress" class="storage-progress" max="100" value="{{pct .Status.UsedPercent}}">{{pct .Status.UsedPercent}}%</progress>
+    {{if .DonationURL}}
     <p class="storage-donate">
         Want to support development and increase this limit?
-        <a href="https://ko-fi.com/driftywinds" target="_blank" rel="noopener noreferrer">Donate here</a>
+        <a href="{{.DonationURL}}" target="_blank" rel="noopener noreferrer">Donate here</a>
     </p>
+    {{end}}
     <p class="muted" id="storage-detail">
         <span id="storage-available">{{bytes .Status.Available}}</span> available<span id="storage-reserved">{{if gt .Status.Reserved 0}} · {{bytes .Status.Reserved}} reserved by active uploads{{end}}</span>
-        · damn that's not that much
     </p>
 </fieldset>
 {{end}}
@@ -104,7 +107,7 @@
     <pre id="hash-result" class="hash-result" hidden><code id="hash-value"></code></pre>
     <p id="hash-warning" class="warn-text" hidden>Save this hash now — it is shown once and cannot be recovered.</p>
     {{else}}
-    <p>Uploads are restricted. User hashes are issued by the admin; public creation is disabled. Email drifty at interim@drifty.win for access.</p>
+    <p>Uploads are restricted. User hashes are issued by the admin; public creation is disabled. {{if .ContactEmail}}Email <a href="mailto:{{.ContactEmail}}">{{.ContactEmail}}</a> for access.{{else}}Ask the admin for access.{{end}}</p>
     <p><a href="/api">Read the API docs</a></p>
     {{end}}
 </section>

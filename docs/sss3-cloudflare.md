@@ -26,7 +26,7 @@ docker compose -f compose.sss3.yaml --env-file .env.sss3 up -d
 
 Stop the old sss3-only compose first. The new stack reuses `./data` and
 publishes Caddy on host port `5553`, so an existing Cloudflare Tunnel for
-`sss3.drifty.win` → `http://localhost:5553` keeps working — it now reaches
+`sss3.example.com` → `http://localhost:5553` keeps working — it now reaches
 Caddy instead of sss3 directly.
 
 Caddy:
@@ -47,10 +47,10 @@ A typical Cloudflare Tunnel ingress while running cloudflared on the host:
 tunnel: YOUR_TUNNEL_ID
 credentials-file: /etc/cloudflared/YOUR_TUNNEL_ID.json
 ingress:
-  - hostname: sss3.drifty.win
+  - hostname: sss3.example.com
     service: http://localhost:5553
     originRequest:
-      httpHostHeader: sss3.drifty.win
+      httpHostHeader: sss3.example.com
   - service: http_status:404
 ```
 
@@ -63,7 +63,7 @@ and the public Caddy hostname only for browser presigned URLs:
 
 ```dotenv
 S3_ENDPOINT=http://stupid-simple-s3:5553
-S3_PUBLIC_ENDPOINT=https://sss3.drifty.win
+S3_PUBLIC_ENDPOINT=https://sss3.example.com
 S3_REGION=us-east-1
 S3_BUCKET=interim
 S3_FORCE_PATH_STYLE=true
@@ -76,10 +76,12 @@ Docker network as this stack, or otherwise give it a direct/private route to
 sss3. Keep `S3_PUBLIC_ENDPOINT` on the public Caddy hostname.
 
 If multipart is enabled and sss3 rejects normal part PUTs with
-`SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` and keep
-`STUPID_MAX_PART_SIZE` at or below interim's `MULTIPART_PART_SIZE`. The checked-in
-Compose file defaults the provider cap to 16 MiB; raise both values together if
-you need an automatically larger part size for very large files. Raise
+`SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` only as a last
+resort and keep `STUPID_MAX_PART_SIZE` exactly at or below interim's
+`MULTIPART_PART_SIZE`; otherwise a client can inflate individual parts beyond
+the intended size before completion rejects them. The checked-in Compose file
+defaults the provider cap to 16 MiB; raise both values together if you need an
+automatically larger part size for very large files. Raise
 `STUPID_MAX_OBJECT_SIZE` above its 5 GiB default when `MAX_FILE_SIZE` exceeds
 5 GB.
 
@@ -100,8 +102,9 @@ matter for this deployment:
 - **Presigned PUT from non-browser clients can hit Cloudflare error 1010.**
   Cloudflare browser-integrity checks may reject a scripted presigned PUT even
   though interim's own signed SDK requests succeed; browser uploads are
-  unaffected. Use a browser-like `User-Agent`, exempt the S3 hostname from bot
-  checks, or bypass Cloudflare.
+  unaffected. Use a dedicated non-proxied S3 hostname or a documented Cloudflare
+  exception for the S3 host. Do not rely on User-Agent spoofing or disabling bot
+  checks globally.
 - **Signed `Accept-Encoding` breaks sss3.** The Go SDK normally signs
   `Accept-Encoding: identity`; Cloudflare/sss3 produce `SignatureDoesNotMatch`.
   interim removes that header from the signing path and disables transport
@@ -149,7 +152,7 @@ variants that a denylist would miss.
 ```
 
 Set `S3_PUBLIC_ENDPOINT` to the public Caddy hostname (for example
-`https://sss3.drifty.win`) and keep `S3_ENDPOINT` on a direct/private sss3
+`https://sss3.example.com`) and keep `S3_ENDPOINT` on a direct/private sss3
 address. Keep `S3_FORCE_PATH_STYLE=true`, use region `us-east-1`, and use a
 dedicated bucket. Cloudflare cannot raise its request-body limit, so large-file
 support requires a non-proxied endpoint or a different upload design.

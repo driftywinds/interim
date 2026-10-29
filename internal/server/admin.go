@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"interim/internal/config"
-	"interim/internal/store"
-	"interim/internal/units"
+	"github.com/driftywinds/interim/internal/config"
+	"github.com/driftywinds/interim/internal/store"
+	"github.com/driftywinds/interim/internal/units"
 )
 
 const (
@@ -212,19 +212,19 @@ func (s *Server) handleAdminDeleteFiles(w http.ResponseWriter, r *http.Request) 
 		file, err := s.store.FileByID(r.Context(), id)
 		if err != nil {
 			if !errors.Is(err, store.ErrNotFound) {
-				s.logger.Warn("admin delete lookup", "file_id", id, "error", err)
+				s.logger.Warn("admin delete lookup", "file_id", s.logID(id), "error", err)
 			}
 			failed++
 			continue
 		}
 		if err := s.objects.Delete(r.Context(), file.ObjectKey); err != nil {
-			s.logger.Error("admin delete object", "file_id", file.ID, "error", err)
+			s.logger.Error("admin delete object", "file_id", s.logID(file.ID), "error", err)
 			failed++
 			continue
 		}
 		removed, err := s.store.DeleteFileRow(r.Context(), file.ID)
 		if err != nil || !removed {
-			s.logger.Error("admin delete row", "file_id", file.ID, "error", err)
+			s.logger.Error("admin delete row", "file_id", s.logID(file.ID), "error", err)
 			failed++
 			continue
 		}

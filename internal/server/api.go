@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"interim/internal/store"
+	"github.com/driftywinds/interim/internal/store"
 )
 
 type apiErrorEnvelope struct {
@@ -457,7 +457,7 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 
 	url, expires, err := s.downloadURL(r.Context(), file)
 	if err != nil {
-		s.logger.Error("create download link", "file_id", file.ID, "error", err)
+		s.logger.Error("create download link", "file_id", s.logID(file.ID), "error", err)
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a download link.")
 		return
 	}
@@ -521,13 +521,13 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.objects.Delete(r.Context(), file.ObjectKey); err != nil {
-		s.logger.Error("delete object", "file_id", file.ID, "error", err)
+		s.logger.Error("delete object", "file_id", s.logID(file.ID), "error", err)
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not delete the stored object.")
 		return
 	}
 	deleted, err := s.store.DeleteFileRow(r.Context(), file.ID)
 	if err != nil {
-		s.logger.Error("delete file row", "file_id", file.ID, "error", err)
+		s.logger.Error("delete file row", "file_id", s.logID(file.ID), "error", err)
 		s.writeAPIError(w, r, http.StatusInternalServerError, "internal_error", "Could not delete file metadata.")
 		return
 	}

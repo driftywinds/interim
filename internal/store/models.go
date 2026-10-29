@@ -101,6 +101,10 @@ type UploadIntent struct {
 	ExpiresAt         time.Time
 	CompletedAt       *time.Time
 	FileID            *string
+	Claim             string
+	ClaimAt           time.Time
+	StagingHoldUntil  time.Time
+	URLEExpiresAt     time.Time
 }
 
 type UploadPart struct {

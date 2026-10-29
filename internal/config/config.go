@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
@@ -18,7 +19,7 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"interim/internal/units"
+	"github.com/driftywinds/interim/internal/units"
 )
 
 const (
@@ -51,6 +52,8 @@ type Config struct {
 	SetupToken            string
 	SetupTokenPath        string
 	LogLevel              string
+	ContactEmail          string
+	DonationURL           string
 
 	Retention                  time.Duration
 	ExtendRetentionOnDownload  bool
@@ -306,6 +309,14 @@ func Load() (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("LOG_LEVEL must be debug, info, warn, or error")
 	}
+	contactEmail, err := parseContactEmail(os.Getenv("CONTACT_EMAIL"))
+	if err != nil {
+		return Config{}, err
+	}
+	donationURL, err := parseDonationURL(os.Getenv("DONATION_URL"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		PublicBaseURL:              publicBaseURL,
@@ -322,6 +333,8 @@ func Load() (Config, error) {
 		SetupToken:                 setupToken,
 		SetupTokenPath:             setupTokenPath,
 		LogLevel:                   logLevel,
+		ContactEmail:               contactEmail,
+		DonationURL:                donationURL,
 		Retention:                  retention,
 		ExtendRetentionOnDownload:  extendRetentionOnDownload,
 		MaxStorage:                 maxStorage,
@@ -456,6 +469,9 @@ func loadS3() (S3Config, error) {
 	if err != nil {
 		return S3Config{}, err
 	}
+	if blocksCopy && putAccessKey == "" && publicEndpoint == endpoint {
+		return S3Config{}, errors.New("S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true requires S3_PUT_ACCESS_KEY/S3_PUT_SECRET_KEY when S3_PUBLIC_ENDPOINT is the same as S3_ENDPOINT")
+	}
 
 	prefix := strings.Trim(strings.TrimSpace(os.Getenv("S3_OBJECT_PREFIX")), "/")
 	if prefix == "" {
@@ -477,6 +493,30 @@ func loadS3() (S3Config, error) {
 		AutoCreate:               autoCreate,
 		PublicEndpointBlocksCopy: blocksCopy,
 	}, nil
+}
+
+func parseContactEmail(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value {
+		return "", errors.New("CONTACT_EMAIL must be a plain email address")
+	}
+	return value, nil
+}
+
+func parseDonationURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return "", errors.New("DONATION_URL must be an https URL with a host and no credentials")
+	}
+	return parsed.String(), nil
 }
 
 func parsePublicBaseURL(value string) (string, *url.URL, error) {
@@ -614,6 +654,10 @@ func parseTrustedClientIPHeader(raw string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
+	switch strings.ToLower(value) {
+	case "forwarded", "x-forwarded-for", "x-real-ip":
+		return "", errors.New("TRUSTED_CLIENT_IP_HEADER cannot be a standard forwarding header; use a header your proxy overwrites, such as CF-Connecting-IP")
+	}
 	for _, r := range value {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
 			continue
@@ -657,6 +701,8 @@ var placeholderMarkers = []string{
 	"your_secret",
 	"insert-secret",
 	"placeholder",
+	"same value",
+	"same-value",
 }
 
 // validateSecret rejects the checked-in example values and trivially weak

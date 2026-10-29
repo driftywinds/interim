@@ -50,11 +50,12 @@ for presigning browser PUTs; `S3_ACCESS_KEY` / `S3_SECRET_KEY` retain read,
 copy, list, and delete access. On AWS, the upload identity needs only
 `s3:PutObject` on the bucket/prefix. On B2, use a key with `writeFiles` only.
 Multipart requires either write-only upload credentials or
-`S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true` for a proxy that strips every `X-Amz-*`
-request header. sss3 has no write-only credential, so its public proxy must
-enforce the strip; the checked-in Caddy config does this. Do not assume B2, R2,
-MinIO, or NooBaa rejects an unsigned `X-Amz-Copy-Source`; verify the provider's
-behavior.
+`S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true` for a distinct public proxy that strips
+every `X-Amz-*` request header. The flag is an unverified operator assertion; use
+write-only credentials where possible. sss3 has no write-only credential, so its
+public proxy must enforce the strip; the checked-in Caddy config does this. Do
+not assume B2, R2, MinIO, or NooBaa rejects an unsigned `X-Amz-Copy-Source`;
+verify the provider's behavior.
 
 `MULTIPART_SIGN_PART_LENGTH=true` signs each part's exact Content-Length.
 Completion also calls `ListParts` and compares provider-reported sizes and

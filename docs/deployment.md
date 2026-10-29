@@ -12,7 +12,7 @@
   appears to come from the proxy: per-IP login, upload, key-creation and download
   limits become global, and one failed-login burst can lock out the admin.
 - If your frontend/proxy overwrites `X-Forwarded-For` with its own address but
-  preserves `CF-Connecting-IP` (Charon does this), set
+  preserves `CF-Connecting-IP` (some proxies do), set
   `TRUSTED_CLIENT_IP_HEADER=CF-Connecting-IP` alongside `TRUST_PROXY=true` and
   `TRUSTED_PROXY_CIDRS`. The header is only read from a trusted proxy peer.
 - Keep the one-time `SETUP_TOKEN` (or `DATA_DIR/setup_token`) private. The file

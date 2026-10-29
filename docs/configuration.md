@@ -8,29 +8,31 @@ automatically for local runs, and Compose uses it via `env_file`. See
 | --- | --- | --- | --- |
 | `PUBLIC_BASE_URL` | yes | — | Public origin used in links and API examples. No trailing slash or path prefix. |
 | `LISTEN_ADDR` | no | `:8080` | HTTP listen address. |
-| `DATA_DIR` | no | `./data` | Directory for SQLite and generated files. |
+| `DATA_DIR` | no | `./data` | Directory for SQLite and generated files. Compose overrides this to `/data` inside the container. |
 | `DATABASE_PATH` | no | `DATA_DIR/interim.db` | Explicit SQLite path. |
 | `SESSION_SECRET` | no | auto-generated | At least 32 chars. If absent, a 0600 secret is generated in `DATA_DIR`. |
 | `SETUP_TOKEN` | no | auto-generated | One-time token required to create the first admin. At least 32 chars. If absent, `DATA_DIR/setup_token` is generated (0600) and deleted after setup. |
 | `COOKIE_SECURE` | no | `auto` | `auto` follows the scheme of `PUBLIC_BASE_URL`. `__Host-` cookie names are used when secure. |
 | `TRUST_PROXY` | no | `false` | Trust forwarded headers from peers in `TRUSTED_PROXY_CIDRS`. |
 | `TRUSTED_PROXY_CIDRS` | with `TRUST_PROXY` | — | Comma/space-separated proxy CIDRs or IPs. Required and validated when `TRUST_PROXY=true`. |
-| `TRUSTED_CLIENT_IP_HEADER` | no | — | Optional header carrying the real client IP (for example `CF-Connecting-IP`). Only read when the peer is in `TRUSTED_PROXY_CIDRS`; requires `TRUST_PROXY=true`. |
+| `TRUSTED_CLIENT_IP_HEADER` | no | — | Optional header carrying the real client IP (for example `CF-Connecting-IP`). Only read when the peer is in `TRUSTED_PROXY_CIDRS`; requires `TRUST_PROXY=true`. `Forwarded`, `X-Forwarded-For`, and `X-Real-IP` are rejected. |
 | `ADMIN_SESSION_TTL` | no | `12h` | Absolute session lifetime, 15m–168h. |
 | `ADMIN_IDLE_TIMEOUT` | no | `2h` | Revoke an admin session after this much inactivity, 5m–168h. |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error`. |
+| `CONTACT_EMAIL` | no | — | Optional contact address shown on the restricted-upload page. |
+| `DONATION_URL` | no | — | Optional https support link shown on the home page. |
 | `S3_ENDPOINT` | AWS no | — | Include scheme. Leave empty for AWS S3. Used for server-side Head/Copy/List/Delete. |
 | `S3_PUBLIC_ENDPOINT` | no | `S3_ENDPOINT` | Endpoint embedded in presigned URLs; must be browser-reachable. |
 | `S3_REGION` | no | `us-east-1` | Any non-empty value for servers that ignore regions. |
 | `S3_BUCKET` | yes | — | Must be a bare bucket name. |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | AWS no | — | Leave both empty to use the instance-role/default credential chain. Placeholder values such as `change-me` or `replace-with-*` are rejected. |
 | `S3_PUT_ACCESS_KEY` / `S3_PUT_SECRET_KEY` | no | — | Optional write-only identity used only for presigned browser PUTs. Required for multipart unless the next flag is set. |
-| `S3_PUBLIC_ENDPOINT_BLOCKS_COPY` | no | `false` | Operator assertion that the public endpoint strips every `X-Amz-*` request header. Allows multipart without write-only upload credentials. |
+| `S3_PUBLIC_ENDPOINT_BLOCKS_COPY` | no | `false` | Operator assertion that the public endpoint strips every `X-Amz-*` request header. It is trusted, not verified; prefer `S3_PUT_ACCESS_KEY`/`S3_PUT_SECRET_KEY`. Requires a public endpoint distinct from `S3_ENDPOINT`. |
 | `S3_FORCE_PATH_STYLE` | no | `true` | Keep true for sss3/MinIO/Garage; false for AWS. |
 | `S3_AUTO_CREATE_BUCKET` | no | `false` | Attempts `CreateBucket` if missing. Prefer pre-creating it. |
 | `S3_OBJECT_PREFIX` | no | `files` | Key prefix; normalized with a trailing `/`. |
 | `PUBLIC_UPLOADS_ENABLED` | no | `true` | `false` restricts upload intents to admin-approved user hashes and disables public hash creation. Existing hashes start unapproved. |
-| `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT / part URL lifetime. 5m–2h. |
+| `UPLOAD_URL_TTL` | no | `30m` | Presigned PUT / part URL lifetime. 5m–2h. A completed/aborted single-PUT reservation is held until this deadline. |
 | `UPLOAD_INTENT_TTL` | no | `45m` | Deadline for completion; must be at least `UPLOAD_URL_TTL`. Max 6h. |
 | `MULTIPART_UPLOAD_ENABLED` | no | `false` | Enable S3 multipart uploads for files above `MULTIPART_THRESHOLD`. |
 | `MULTIPART_THRESHOLD` | no | `64MB` | Size above which multipart is used. `0` makes every upload multipart. Max 5GB. |

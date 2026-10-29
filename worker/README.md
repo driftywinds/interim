@@ -78,7 +78,7 @@ TLS certificate automatically.
 ```dotenv
 DOWNLOAD_WORKER_ENABLED=true
 DOWNLOAD_WORKER_URLS=https://dl1.example.com
-DOWNLOAD_WORKER_SECRET=<same value as DOWNLOAD_TOKEN_SECRET>
+DOWNLOAD_WORKER_SECRET=replace-with-openssl-rand-base64-48
 ```
 
 The download URL path is always `/d/<token>`. The configured URL must not
@@ -120,7 +120,7 @@ A Worker custom domain must belong to a zone in the **same Cloudflare account**
 as that Worker. If the second account does not own a separate domain/zone, set
 `workers_dev = true` in its config and use its
 `https://<worker-name>.<account-subdomain>.workers.dev` URL instead of a custom
-domain. Do not try to attach `dl2.drifty.win` to a Worker in a different account
+domain. Do not try to attach `dl2.example.com` to a Worker in a different account
 unless that zone is actually in that account.
 
 Cloudflare's free Worker request allowance is per account, not per Worker.

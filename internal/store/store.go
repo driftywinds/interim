@@ -60,7 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA user_version = 10"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set schema version: %w", err)
 	}
@@ -112,6 +112,22 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE api_keys ADD COLUMN retention_seconds INTEGER NOT NULL DEFAULT -1`); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, db, "upload_intents", "claim",
+		`ALTER TABLE upload_intents ADD COLUMN claim TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "claim_at",
+		`ALTER TABLE upload_intents ADD COLUMN claim_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "staging_hold_until",
+		`ALTER TABLE upload_intents ADD COLUMN staging_hold_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, "upload_intents", "url_expires_at",
+		`ALTER TABLE upload_intents ADD COLUMN url_expires_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS storage_reservations_owner_expires
 		 ON storage_reservations(owner, expires_at)`,
@@ -158,6 +174,11 @@ func (s *Store) Close() error {
 // Pending upload intents and their reservations are persisted because the
 // browser may already have uploaded an object; the janitor reconciles them.
 func (s *Store) ResetForStartup(ctx context.Context) error {
+	// No completion/abort is in flight before the listener starts, so clear
+	// stale claims and let the janitor retry the affected intents.
+	if _, err := s.db.ExecContext(ctx, "UPDATE upload_intents SET claim = '', claim_at = 0 WHERE claim != ''"); err != nil {
+		return fmt.Errorf("clear interrupted upload claims: %w", err)
+	}
 	// A deletion claim only protects the brief object-delete window. After a
 	// restart no deletion is in flight, so clear stale claims and let the
 	// janitor retry. S3 deletes are idempotent.

@@ -7,6 +7,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # The image runs from /data. Override a local DATA_DIR=./data in .env so
+      # SQLite and the setup token stay in the mounted volume.
+      DATA_DIR: /data
+      DATABASE_PATH: /data/interim.db
     ports:
       # Keep the Go listener off the public interfaces. Put Caddy,
       # cloudflared, or another trusted proxy in front of it.

@@ -22,6 +22,8 @@ func withBaseEnv(t *testing.T) {
 	t.Setenv("MAX_STORAGE", "20GB")
 	t.Setenv("MAX_FILE_SIZE", "5GB")
 	t.Setenv("RETENTION", "7d")
+	t.Setenv("CONTACT_EMAIL", "")
+	t.Setenv("DONATION_URL", "")
 }
 
 func TestLoad(t *testing.T) {
@@ -53,6 +55,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.MaxFileSize != MaxSinglePutSize {
 		t.Errorf("max file size = %d", cfg.MaxFileSize)
+	}
+	if cfg.ContactEmail != "" || cfg.DonationURL != "" {
+		t.Errorf("contact/donation should default empty: %q / %q", cfg.ContactEmail, cfg.DonationURL)
 	}
 	if !cfg.PublicUploadsEnabled {
 		t.Error("public uploads should default to enabled")
@@ -181,6 +186,30 @@ func TestTrustedClientIPHeader(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("trusted client header should require TRUST_PROXY=true")
 	}
+
+	t.Setenv("TRUST_PROXY", "true")
+	t.Setenv("TRUSTED_CLIENT_IP_HEADER", "X-Forwarded-For")
+	if _, err := Load(); err == nil {
+		t.Fatal("standard forwarding headers must be rejected")
+	}
+}
+
+func TestContactAndDonationURL(t *testing.T) {
+	withBaseEnv(t)
+	t.Setenv("CONTACT_EMAIL", "admin@example.org")
+	t.Setenv("DONATION_URL", "https://example.org/support")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContactEmail != "admin@example.org" || cfg.DonationURL != "https://example.org/support" {
+		t.Fatalf("contact/donation = %q / %q", cfg.ContactEmail, cfg.DonationURL)
+	}
+
+	t.Setenv("DONATION_URL", "http://example.org")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected non-https donation URL to fail")
+	}
 }
 
 func TestMultipartRequiresUploadIdentity(t *testing.T) {
@@ -190,8 +219,14 @@ func TestMultipartRequiresUploadIdentity(t *testing.T) {
 		t.Fatal("expected multipart without upload identity or copy-block acknowledgment to fail")
 	}
 	t.Setenv("S3_PUBLIC_ENDPOINT_BLOCKS_COPY", "true")
+	t.Setenv("S3_PUBLIC_ENDPOINT", "https://public.example.test")
 	if _, err := Load(); err != nil {
-		t.Fatalf("copy-block acknowledgment should allow multipart: %v", err)
+		t.Fatalf("copy-block acknowledgment should allow multipart through a separate public endpoint: %v", err)
+	}
+
+	t.Setenv("S3_PUBLIC_ENDPOINT", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("copy-block acknowledgment with the server endpoint must be rejected")
 	}
 }
 
@@ -388,6 +423,16 @@ func TestLoadRejectsPlaceholderSecrets(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("worker secret reuse marker", func(t *testing.T) {
+		withBaseEnv(t)
+		t.Setenv("DOWNLOAD_WORKER_ENABLED", "true")
+		t.Setenv("DOWNLOAD_WORKER_URLS", "https://dl.example.test")
+		t.Setenv("DOWNLOAD_WORKER_SECRET", "<same value as DOWNLOAD_TOKEN_SECRET>")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() accepted the documented same-value placeholder")
+		}
+	})
 }
 
 func TestSessionSecretPersisted(t *testing.T) {

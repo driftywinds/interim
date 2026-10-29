@@ -2,6 +2,7 @@ package objects
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -11,6 +12,20 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+func TestS3LongClientHasNoResponseHeaderTimeout(t *testing.T) {
+	client := s3LongHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("long-client response header timeout = %v", transport.ResponseHeaderTimeout)
+	}
+	if s3HTTPClient().Transport.(*http.Transport).ResponseHeaderTimeout != 30*time.Second {
+		t.Fatal("short-client response header timeout changed unexpectedly")
+	}
+}
 
 func TestPresignPutSignsContentLength(t *testing.T) {
 	cfg := aws.Config{

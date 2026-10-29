@@ -10,17 +10,21 @@ import (
 
 var ErrUploadIntentState = errors.New("upload intent is not pending")
 
+const uploadIntentColumns = `id, object_key, api_key_id, original_name, content_type, declared_size,
+	upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
+	state, created_at, expires_at, completed_at, file_id, claim, claim_at, staging_hold_until, url_expires_at`
+
 func scanUploadIntent(scanner rowScanner) (UploadIntent, error) {
 	var intent UploadIntent
 	var apiKeyID sql.NullString
 	var fileID sql.NullString
-	var created, expires int64
+	var created, expires, claimAt, holdUntil, urlExpires int64
 	var completed sql.NullInt64
 	err := scanner.Scan(
 		&intent.ID, &intent.ObjectKey, &apiKeyID, &intent.OriginalName, &intent.ContentType,
 		&intent.DeclaredSize, &intent.UploadTokenHash, &intent.DeleteTokenHash,
 		&intent.MultipartUploadID, &intent.PartSize, &intent.PartCount, &intent.State,
-		&created, &expires, &completed, &fileID,
+		&created, &expires, &completed, &fileID, &intent.Claim, &claimAt, &holdUntil, &urlExpires,
 	)
 	if err != nil {
 		return UploadIntent{}, err
@@ -33,6 +37,15 @@ func scanUploadIntent(scanner rowScanner) (UploadIntent, error) {
 	}
 	intent.CreatedAt = scanTime(created)
 	intent.ExpiresAt = scanTime(expires)
+	if claimAt != 0 {
+		intent.ClaimAt = scanTime(claimAt)
+	}
+	if holdUntil != 0 {
+		intent.StagingHoldUntil = scanTime(holdUntil)
+	}
+	if urlExpires != 0 {
+		intent.URLEExpiresAt = scanTime(urlExpires)
+	}
 	if completed.Valid {
 		value := scanTime(completed.Int64)
 		intent.CompletedAt = &value
@@ -45,12 +58,12 @@ func (s *Store) CreateUploadIntent(ctx context.Context, intent UploadIntent) err
 		`INSERT INTO upload_intents
 		 (id, object_key, api_key_id, original_name, content_type, declared_size,
 		  upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
-		  state, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+		  state, created_at, expires_at, url_expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
 		intent.ID, intent.ObjectKey, intent.APIKeyID, intent.OriginalName, intent.ContentType,
 		intent.DeclaredSize, intent.UploadTokenHash, intent.DeleteTokenHash,
 		intent.MultipartUploadID, intent.PartSize, intent.PartCount,
-		toUnix(intent.CreatedAt), toUnix(intent.ExpiresAt),
+		toUnix(intent.CreatedAt), toUnix(intent.ExpiresAt), toUnix(intent.URLEExpiresAt),
 	)
 	if err != nil {
 		return fmt.Errorf("create upload intent: %w", err)
@@ -60,11 +73,7 @@ func (s *Store) CreateUploadIntent(ctx context.Context, intent UploadIntent) err
 
 func (s *Store) UploadIntentByID(ctx context.Context, id string) (UploadIntent, error) {
 	intent, err := scanUploadIntent(s.db.QueryRowContext(ctx,
-		`SELECT id, object_key, api_key_id, original_name, content_type, declared_size,
-		        upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
-		        state, created_at, expires_at, completed_at, file_id
-		 FROM upload_intents WHERE id = ?`,
-		id,
+		"SELECT "+uploadIntentColumns+" FROM upload_intents WHERE id = ?", id,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadIntent{}, ErrNotFound
@@ -80,11 +89,8 @@ func (s *Store) ExpiredPendingUploadIntents(ctx context.Context, now time.Time, 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, object_key, api_key_id, original_name, content_type, declared_size,
-		        upload_token_hash, delete_token_hash, multipart_upload_id, part_size, part_count,
-		        state, created_at, expires_at, completed_at, file_id
-		 FROM upload_intents
-		 WHERE state = 'pending' AND expires_at <= ?
+		"SELECT "+uploadIntentColumns+` FROM upload_intents
+		 WHERE state = 'pending' AND claim = '' AND expires_at <= ?
 		 ORDER BY expires_at ASC
 		 LIMIT ?`,
 		toUnix(now), limit,
@@ -110,7 +116,7 @@ func (s *Store) ExpiredPendingUploadIntents(ctx context.Context, now time.Time, 
 
 func (s *Store) SetUploadMultipartID(ctx context.Context, id, multipartID string) error {
 	result, err := s.db.ExecContext(ctx,
-		"UPDATE upload_intents SET multipart_upload_id = ? WHERE id = ? AND state = 'pending'",
+		"UPDATE upload_intents SET multipart_upload_id = ? WHERE id = ? AND state = 'pending' AND claim = ''",
 		multipartID, id,
 	)
 	if err != nil {
@@ -169,9 +175,67 @@ func (s *Store) UploadParts(ctx context.Context, uploadID string) ([]UploadPart,
 	return parts, nil
 }
 
-// CommitUploadIntent atomically converts a pending intent into a committed
-// file, consumes its reservation, and marks the intent complete.
-func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file File, now time.Time) error {
+// ClaimUploadIntent reserves the pending intent for one completing, aborting,
+// or expiring operation. The conditional UPDATE is the race guard: a second
+// operation cannot delete an object after a completion has claimed the intent.
+func (s *Store) ClaimUploadIntent(ctx context.Context, id, claim string, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE upload_intents SET claim = ?, claim_at = ?
+		 WHERE id = ? AND state = 'pending' AND claim = ''`,
+		claim, toUnix(now), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim upload intent: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim upload intent rows: %w", err)
+	}
+	return affected == 1, nil
+}
+
+func (s *Store) ReleaseUploadClaim(ctx context.Context, id, claim string) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE upload_intents SET claim = '', claim_at = 0 WHERE id = ? AND state = 'pending' AND claim = ?",
+		id, claim,
+	); err != nil {
+		return fmt.Errorf("release upload claim: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) StaleUploadClaims(ctx context.Context, before time.Time, limit int) ([]UploadIntent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+uploadIntentColumns+` FROM upload_intents
+		 WHERE state = 'pending' AND claim != '' AND claim_at <= ?
+		 ORDER BY claim_at ASC LIMIT ?`,
+		toUnix(before), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list stale upload claims: %w", err)
+	}
+	defer rows.Close()
+	var intents []UploadIntent
+	for rows.Next() {
+		intent, err := scanUploadIntent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan stale upload claim: %w", err)
+		}
+		intents = append(intents, intent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stale upload claims: %w", err)
+	}
+	return intents, nil
+}
+
+// CommitUploadIntent atomically converts a claimed intent into a committed
+// file. A reservation is consumed for multipart uploads; for single PUTs it is
+// retained until the already-issued PUT URL has expired.
+func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file File, now, holdUntil time.Time) error {
 	if file.ID != intentID {
 		return errors.New("file ID must match upload intent ID")
 	}
@@ -181,11 +245,16 @@ func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file Fi
 	}
 	defer tx.Rollback()
 
+	holdUnix := int64(0)
+	if !holdUntil.IsZero() {
+		holdUnix = toUnix(holdUntil)
+	}
 	result, err := tx.ExecContext(ctx,
 		`UPDATE upload_intents
-		 SET state = 'committed', completed_at = ?, file_id = ?
-		 WHERE id = ? AND state = 'pending'`,
-		toUnix(now), file.ID, intentID,
+		 SET state = 'committed', completed_at = ?, file_id = ?,
+		     claim = '', claim_at = 0, staging_hold_until = ?
+		 WHERE id = ? AND state = 'pending' AND claim = 'completing'`,
+		toUnix(now), file.ID, holdUnix, intentID,
 	)
 	if err != nil {
 		return fmt.Errorf("mark upload committed: %w", err)
@@ -198,7 +267,13 @@ func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file Fi
 		return ErrUploadIntentState
 	}
 
-	result, err = tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", intentID)
+	if holdUntil.IsZero() {
+		result, err = tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", intentID)
+	} else {
+		result, err = tx.ExecContext(ctx,
+			"UPDATE storage_reservations SET expires_at = ? WHERE id = ?", holdUnix, intentID,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("consume upload reservation: %w", err)
 	}
@@ -229,46 +304,116 @@ func (s *Store) CommitUploadIntent(ctx context.Context, intentID string, file Fi
 	return nil
 }
 
-// CloseUploadIntent releases the reservation and moves a pending intent to a
-// terminal state. It is idempotent for already-terminal intents.
-func (s *Store) CloseUploadIntent(ctx context.Context, id, state string, now time.Time) error {
+// CloseUploadIntent releases a claimed pending intent into a terminal state. It
+// returns false without touching the reservation if another operation already
+// moved the intent. A non-zero holdUntil keeps the reservation while a
+// single-PUT URL may still recreate the staging object.
+func (s *Store) CloseUploadIntent(ctx context.Context, id, claim, state string, now, holdUntil time.Time) (bool, error) {
 	switch state {
 	case "aborted", "expired", "failed":
 	default:
-		return fmt.Errorf("invalid terminal intent state %q", state)
+		return false, fmt.Errorf("invalid terminal intent state %q", state)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin close upload intent: %w", err)
+		return false, fmt.Errorf("begin close upload intent: %w", err)
 	}
 	defer tx.Rollback()
 
-	var current string
-	if err := tx.QueryRowContext(ctx, "SELECT state FROM upload_intents WHERE id = ?", id).Scan(&current); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return fmt.Errorf("read upload intent state: %w", err)
+	holdUnix := int64(0)
+	if !holdUntil.IsZero() {
+		holdUnix = toUnix(holdUntil)
 	}
-	if current == "pending" {
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE upload_intents SET state = ?, completed_at = ? WHERE id = ?",
-			state, toUnix(now), id,
-		); err != nil {
-			return fmt.Errorf("close upload intent: %w", err)
-		}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE upload_intents
+		 SET state = ?, completed_at = ?, claim = '', claim_at = 0, staging_hold_until = ?
+		 WHERE id = ? AND state = 'pending' AND claim = ?`,
+		state, toUnix(now), holdUnix, id, claim,
+	)
+	if err != nil {
+		return false, fmt.Errorf("close upload intent: %w", err)
 	}
-	// Also clean a lingering reservation for an already-terminal intent. This is
-	// a no-op for committed intents because their reservation was consumed.
-	if _, err := tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", id); err != nil {
-		return fmt.Errorf("release upload reservation: %w", err)
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("close upload intent rows: %w", err)
+	}
+	if affected != 1 {
+		return false, nil
+	}
+
+	if holdUntil.IsZero() {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", id); err != nil {
+			return false, fmt.Errorf("release upload reservation: %w", err)
+		}
+	} else {
+		result, err = tx.ExecContext(ctx,
+			"UPDATE storage_reservations SET expires_at = ? WHERE id = ?", holdUnix, id,
+		)
+		if err != nil {
+			return false, fmt.Errorf("hold upload reservation: %w", err)
+		}
+		held, err := result.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("hold upload reservation rows: %w", err)
+		}
+		if held != 1 {
+			return false, ErrReservationMissing
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_parts WHERE upload_id = ?", id); err != nil {
-		return fmt.Errorf("delete upload parts: %w", err)
+		return false, fmt.Errorf("delete upload parts: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit close upload intent: %w", err)
+		return false, fmt.Errorf("commit close upload intent: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Store) ExpiredStagingHolds(ctx context.Context, now time.Time, limit int) ([]UploadIntent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+uploadIntentColumns+` FROM upload_intents
+		 WHERE staging_hold_until > 0 AND staging_hold_until <= ?
+		 ORDER BY staging_hold_until ASC LIMIT ?`,
+		toUnix(now), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list expired staging holds: %w", err)
+	}
+	defer rows.Close()
+	var intents []UploadIntent
+	for rows.Next() {
+		intent, err := scanUploadIntent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan expired staging hold: %w", err)
+		}
+		intents = append(intents, intent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expired staging holds: %w", err)
+	}
+	return intents, nil
+}
+
+func (s *Store) FinishStagingHold(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin finish staging hold: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM storage_reservations WHERE id = ?", id); err != nil {
+		return fmt.Errorf("release staging hold reservation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE upload_intents SET staging_hold_until = 0 WHERE id = ?", id,
+	); err != nil {
+		return fmt.Errorf("clear staging hold: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit staging hold: %w", err)
 	}
 	return nil
 }
@@ -281,7 +426,7 @@ func (s *Store) DeleteTerminalUploadIntents(ctx context.Context, before time.Tim
 		`DELETE FROM upload_intents
 		 WHERE id IN (
 		     SELECT id FROM upload_intents
-		     WHERE state != 'pending' AND expires_at <= ?
+		     WHERE state != 'pending' AND claim = '' AND staging_hold_until = 0 AND expires_at <= ?
 		     ORDER BY expires_at ASC
 		     LIMIT ?
 		 )`,
@@ -316,7 +461,8 @@ func (s *Store) KnownObjectKeys(ctx context.Context, now time.Time) (map[string]
 	rows.Close()
 
 	rows, err = s.db.QueryContext(ctx,
-		"SELECT object_key FROM upload_intents WHERE state = 'pending' AND expires_at > ?",
+		`SELECT object_key FROM upload_intents
+		 WHERE (state = 'pending' AND expires_at > ?) OR staging_hold_until > 0`,
 		toUnix(now),
 	)
 	if err != nil {
@@ -359,7 +505,10 @@ func (s *Store) KnownMultipartUploadIDs(ctx context.Context) (map[string]struct{
 func (s *Store) CleanOrphanReservations(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
 		`DELETE FROM storage_reservations
-		 WHERE id NOT IN (SELECT id FROM upload_intents WHERE state = 'pending')`,
+		 WHERE id NOT IN (
+		     SELECT id FROM upload_intents
+		     WHERE state = 'pending' OR staging_hold_until > 0
+		 )`,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("clean orphan reservations: %w", err)

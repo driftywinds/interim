@@ -53,7 +53,10 @@ func (s *Store) ReserveStorage(ctx context.Context, id string, bytes int64, owne
 	// trigger adjusts reserved_bytes) so the fast path below never has to
 	// aggregate old rows.
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM storage_reservations WHERE expires_at <= ?", toUnix(now),
+		`DELETE FROM storage_reservations
+		 WHERE expires_at <= ?
+		   AND id NOT IN (SELECT id FROM upload_intents WHERE staging_hold_until > 0)`,
+		toUnix(now),
 	); err != nil {
 		return false, fmt.Errorf("clear expired reservations: %w", err)
 	}
@@ -67,15 +70,24 @@ func (s *Store) ReserveStorage(ctx context.Context, id string, bytes int64, owne
 		     ?
 		 ) <= ?)
 		 AND (? <= 0 OR (
-		     COALESCE((SELECT SUM(bytes) FROM storage_reservations WHERE owner = ? AND expires_at > ?), 0) +
+		     COALESCE((SELECT SUM(bytes) FROM storage_reservations
+		               WHERE owner = ? AND (expires_at > ? OR id IN (
+		                   SELECT id FROM upload_intents WHERE staging_hold_until > 0
+		               ))), 0) +
 		     ?
 		 ) <= ?)
 		 AND (? <= 0 OR (
-		     SELECT COUNT(*) FROM storage_reservations WHERE owner = ? AND expires_at > ?
+		     SELECT COUNT(*) FROM storage_reservations
+		     WHERE owner = ? AND (expires_at > ? OR id IN (
+		         SELECT id FROM upload_intents WHERE staging_hold_until > 0
+		     ))
 		 ) < ?)
 		 AND (? <= 0 OR (
 		     (SELECT files FROM usage_totals WHERE id = 1) +
-		     (SELECT COUNT(*) FROM storage_reservations WHERE expires_at > ?)
+		     (SELECT COUNT(*) FROM storage_reservations
+		      WHERE expires_at > ? OR id IN (
+		          SELECT id FROM upload_intents WHERE staging_hold_until > 0
+		      ))
 		 ) < ?)`,
 		id, bytes, owner, toUnix(now), toUnix(expiresAt),
 		limits.TotalBytes, bytes, limits.TotalBytes,
@@ -102,7 +114,10 @@ func (s *Store) ReleaseReservation(ctx context.Context, id string) error {
 
 func (s *Store) ClearExpiredReservations(ctx context.Context, now time.Time) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		"DELETE FROM storage_reservations WHERE expires_at <= ?", toUnix(now),
+		`DELETE FROM storage_reservations
+		 WHERE expires_at <= ?
+		   AND id NOT IN (SELECT id FROM upload_intents WHERE staging_hold_until > 0)`,
+		toUnix(now),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("clear expired reservations: %w", err)

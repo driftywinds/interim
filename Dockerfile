@@ -1,5 +1,5 @@
 # Pin base images by digest for reproducible/secure production builds.
-FROM golang:1.27-alpine AS build
+FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
@@ -8,7 +8,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/interim ./cmd/interim
 
-FROM alpine:3.22
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S interim \
     && adduser -S -G interim -h /data interim \

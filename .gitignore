@@ -24,11 +24,24 @@ setup_token
 !.env.sss3.example
 
 # Worker dependencies and local secrets
+node_modules/
 /worker/node_modules/
 /worker/.wrangler/
 /worker/.dev.vars
 /worker/wrangler.toml
 /worker/wrangler.*.toml
+
+# Secrets and local certificates
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*.tmp
+*.bak
+*.orig
+*.rej
+.env.*.local
 
 # Build output
 /bin/

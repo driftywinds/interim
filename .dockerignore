@@ -7,6 +7,7 @@
 data
 .research
 .gocache
+.gotmp
 .tmp
 tmp
 bin
@@ -15,9 +16,18 @@ coverage.out
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+*.log
+scripts
+*.pem
+*.key
+*.p12
+*.pfx
 README.md
 TO-DO.md
 skills
+node_modules
 worker/node_modules
 worker/.wrangler
 worker/.dev.vars

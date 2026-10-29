@@ -25,12 +25,12 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"interim/internal/config"
-	"interim/internal/download"
-	"interim/internal/objects"
-	"interim/internal/store"
-	"interim/internal/units"
-	webassets "interim/web"
+	"github.com/driftywinds/interim/internal/config"
+	"github.com/driftywinds/interim/internal/download"
+	"github.com/driftywinds/interim/internal/objects"
+	"github.com/driftywinds/interim/internal/store"
+	"github.com/driftywinds/interim/internal/units"
+	webassets "github.com/driftywinds/interim/web"
 )
 
 const (
@@ -46,6 +46,13 @@ var neverExpires = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 func neverExpiresAt(t time.Time) bool {
 	return !t.Before(neverExpires)
+}
+
+// logID keeps capability-bearing file/upload IDs out of logs while still
+// allowing operators to correlate repeated events for the same object.
+func (s *Server) logID(id string) string {
+	sum := sha256.Sum256([]byte("interim-log-id:" + id))
+	return hex.EncodeToString(sum[:6])
 }
 
 var (
@@ -238,6 +245,8 @@ func (s *Server) basePage(r *http.Request, title, active string) PageData {
 		DownloadTTL:               s.cfg.DownloadTTL,
 		CurrentPath:               r.URL.Path,
 		AssetVersion:              s.assetVersion,
+		ContactEmail:              s.cfg.ContactEmail,
+		DonationURL:               s.cfg.DonationURL,
 	}
 }
 
@@ -273,7 +282,7 @@ func (s *Server) retainOnDownload(ctx context.Context, file store.File) store.Fi
 		now := s.now().UTC().Truncate(time.Second)
 		extended, err := s.store.ExtendFileExpiry(ctx, file.ID, now, neverExpires)
 		if err != nil {
-			s.logger.Error("extend file retention on download", "file_id", file.ID, "error", err)
+			s.logger.Error("extend file retention on download", "file_id", s.logID(file.ID), "error", err)
 			return file
 		}
 		if extended {
@@ -285,7 +294,7 @@ func (s *Server) retainOnDownload(ctx context.Context, file store.File) store.Fi
 	expiresAt := now.Add(retention)
 	extended, err := s.store.ExtendFileExpiry(ctx, file.ID, now, expiresAt)
 	if err != nil {
-		s.logger.Error("extend file retention on download", "file_id", file.ID, "error", err)
+		s.logger.Error("extend file retention on download", "file_id", s.logID(file.ID), "error", err)
 		return file
 	}
 	if extended {
@@ -609,7 +618,7 @@ func (s *Server) clientIP(r *http.Request) string {
 		return clientNetwork(remoteAddr)
 	}
 
-	// Some proxies (notably Cloudflare via Charon/Caddy) pass the real client
+	// Some proxies (for example Cloudflare in front of a reverse proxy) pass the real client
 	// in a dedicated header and overwrite X-Forwarded-For with their own peer
 	// address. Only consult this header after the remote peer has passed the
 	// trusted-proxy check, so a direct client cannot spoof it.

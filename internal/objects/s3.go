@@ -21,7 +21,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
 
-	"interim/internal/config"
+	"github.com/driftywinds/interim/internal/config"
 )
 
 var (
@@ -73,6 +73,7 @@ type Store interface {
 
 type S3Store struct {
 	client       *s3.Client
+	longClient   *s3.Client
 	presigner    *s3.PresignClient
 	putPresigner *s3.PresignClient
 	bucket       string
@@ -124,6 +125,9 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 	}
 
 	client := newClient(awsCfg, cfg.S3.Endpoint)
+	longCfg := awsCfg
+	longCfg.HTTPClient = s3LongHTTPClient()
+	longClient := newClient(longCfg, cfg.S3.Endpoint)
 	publicClient := client
 	if cfg.S3.PublicEndpoint != cfg.S3.Endpoint {
 		publicClient = newClient(awsCfg, cfg.S3.PublicEndpoint)
@@ -139,6 +143,7 @@ func NewS3(ctx context.Context, cfg config.Config, logger *slog.Logger) (*S3Stor
 
 	store := &S3Store{
 		client:       client,
+		longClient:   longClient,
 		presigner:    s3.NewPresignClient(publicClient),
 		putPresigner: s3.NewPresignClient(putPublicClient),
 		bucket:       cfg.S3.Bucket,
@@ -213,7 +218,7 @@ func (s *S3Store) Copy(ctx context.Context, srcKey, dstKey, contentType, content
 	if sourceETag != "" {
 		input.CopySourceIfMatch = aws.String(`"` + strings.Trim(sourceETag, `"`) + `"`)
 	}
-	if _, err := s.client.CopyObject(ctx, input); err != nil {
+	if _, err := s.longClient.CopyObject(ctx, input); err != nil {
 		if isPreconditionFailed(err) {
 			return ErrPreconditionFailed
 		}
@@ -323,7 +328,7 @@ func (s *S3Store) CompleteMultipart(ctx context.Context, key, uploadID string, p
 			PartNumber: aws.Int32(part.PartNumber),
 		})
 	}
-	_, err := s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	_, err := s.longClient.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(s.bucket),
 		Key:      aws.String(key),
 		UploadId: aws.String(uploadID),
@@ -495,18 +500,32 @@ func AttachmentDisposition(filename string) string {
 }
 
 func s3HTTPClient() *http.Client {
+	transport := s3Transport()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{Transport: transport}
+}
+
+// s3LongHTTPClient is for CopyObject and CompleteMultipartUpload, which can
+// legitimately take minutes for large objects. The caller supplies the overall
+// deadline; the transport must not impose a 30-second response-header ceiling.
+func s3LongHTTPClient() *http.Client {
+	transport := s3Transport()
+	transport.ResponseHeaderTimeout = 0
+	return &http.Client{Transport: transport}
+}
+
+func s3Transport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}).DialContext
 	transport.TLSHandshakeTimeout = 10 * time.Second
-	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 16
 	transport.DisableCompression = true
-	return &http.Client{Transport: transport}
+	return transport
 }
 
 // SanitizeContentType normalizes an untrusted upload content type. Anything

@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	"interim/internal/store"
+	"github.com/driftywinds/interim/internal/store"
 )
 
 type PageData struct {
@@ -26,6 +26,8 @@ type PageData struct {
 	DownloadTTL               time.Duration
 	CurrentPath               string
 	AssetVersion              string
+	ContactEmail              string
+	DonationURL               string
 }
 
 type StatusView struct {

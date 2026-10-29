@@ -5,6 +5,8 @@
 # session secret, and sss3 object store would share a writable directory.
 # Caddy publishes host port 5553, so the existing Cloudflare Tunnel target
 # http://localhost:5553 keeps working and now hits Caddy instead of sss3.
+# sss3 also publishes 127.0.0.1:5556 for interim's direct server-side S3 calls;
+# expose that only over the tailnet (see docs/tailscale-sss3.md).
 #
 #   cp .env.sss3.example .env.sss3
 #   # edit INTERIM_ORIGIN and sss3 credentials
@@ -15,7 +17,7 @@ name: sss3
 services:
   stupid-simple-s3:
     # For production, pin this by digest (or set SSS3_IMAGE to a digest).
-    image: ${SSS3_IMAGE:-ghcr.io/espebra/stupid-simple-s3:latest}
+    image: ${SSS3_IMAGE:-ghcr.io/espebra/stupid-simple-s3:v2.3.4}
     container_name: stupid-simple-s3
     restart: unless-stopped
     environment:
@@ -30,12 +32,16 @@ services:
       STUPID_MAX_OBJECT_SIZE: ${STUPID_MAX_OBJECT_SIZE:-5368709120}
     volumes:
       - ./data:/var/lib/stupid-simple-s3
+    ports:
+      # Direct sss3 listener for interim's server-side S3 calls. Keep this on
+      # loopback and expose it only over the tailnet; never publish it publicly.
+      - "127.0.0.1:5556:5553"
     networks:
       - sss3
 
   caddy:
     # Pin this by digest in production too.
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
     container_name: sss3-cors
     restart: unless-stopped
     depends_on:
@@ -50,6 +56,13 @@ services:
       - ./Caddyfile.sss3:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
       interval: 30s

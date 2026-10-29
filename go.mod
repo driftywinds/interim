@@ -1,4 +1,4 @@
-module interim
+module github.com/driftywinds/interim
 
 go 1.27.0
 

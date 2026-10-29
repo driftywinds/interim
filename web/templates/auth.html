@@ -13,10 +13,10 @@
             <input type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9._-]{3,32}">
             <p class="field-hint">3–32 characters: letters, numbers, dots, underscores, or dashes.</p>
             <label for="password">Password</label>
-            <input type="password" id="password" name="password" autocomplete="new-password" required minlength="10" maxlength="72">
-            <p class="field-hint">At least 10 characters. Store it securely; there is no password-reset flow.</p>
+            <input type="password" id="password" name="password" autocomplete="new-password" required minlength="12" maxlength="72">
+            <p class="field-hint">At least 12 characters. Store it securely; there is no password-reset flow.</p>
             <label for="password_confirm">Confirm password</label>
-            <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="10" maxlength="72">
+            <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required minlength="12" maxlength="72">
             <button type="submit">Create admin</button>
         </form>
     {{else}}

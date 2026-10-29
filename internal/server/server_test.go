@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"interim/internal/config"
-	"interim/internal/download"
-	"interim/internal/objects"
-	"interim/internal/store"
+	"github.com/driftywinds/interim/internal/config"
+	"github.com/driftywinds/interim/internal/download"
+	"github.com/driftywinds/interim/internal/objects"
+	"github.com/driftywinds/interim/internal/store"
 )
 
 type fakeObject struct {
@@ -53,6 +53,7 @@ type fakeStore struct {
 	multipart        map[string]*fakeMultipart
 	nextMultipart    int
 	abortErr         error
+	deleteErr        error
 	healthCalls      int
 	presignPutLength int64
 	presignPutCalls  int
@@ -79,8 +80,11 @@ func (f *fakeStore) putObject(key string, data []byte, modified time.Time) {
 
 func (f *fakeStore) Delete(ctx context.Context, key string) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.objects, key)
-	f.mu.Unlock()
 	return nil
 }
 
@@ -1757,6 +1761,11 @@ func TestOwnershipAndStorageQuota(t *testing.T) {
 	if code := env.deleteFile(t, result.ID, hashB, ""); code != http.StatusNotFound {
 		t.Fatalf("other key delete status = %d, want 404", code)
 	}
+	// The completed single PUT's presigned URL is still valid, so its
+	// reservation is held until that URL expires. Advance past the hold before
+	// testing the next upload.
+	env.server.now = func() time.Time { return time.Now().Add(40 * time.Minute) }
+	env.server.MaintenanceOnce(context.Background())
 	fill := env.upload(t, hashA, "b.bin", make([]byte, 20))
 	if fill.Status != http.StatusCreated {
 		t.Fatalf("fill upload status = %d: %s", fill.Status, fill.Body)
@@ -1813,9 +1822,12 @@ func TestExpiryAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.server.now = func() time.Time { return time.Now().Add(8 * 24 * time.Hour) }
-	status, _ := getBody(t, env.client, env.http.URL+"/f/"+result.ID)
+	status, expiredPage := getBody(t, env.client, env.http.URL+"/f/"+result.ID)
 	if status != http.StatusGone {
 		t.Fatalf("expired page status = %d", status)
+	}
+	if bytes.Contains([]byte(expiredPage), []byte("gone.txt")) {
+		t.Fatal("expired page disclosed the filename")
 	}
 	status, _ = getBody(t, env.client, env.http.URL+"/api/v1/files/"+result.ID)
 	if status != http.StatusGone {
@@ -1928,8 +1940,17 @@ func TestDirectUploadIntentAndIdempotentCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Used != 11 || usage.Reserved != 0 || usage.Files != 1 {
+	if usage.Used != 11 || usage.Reserved != 11 || usage.Files != 1 {
 		t.Fatalf("after complete usage = %+v", usage)
+	}
+	env.server.now = func() time.Time { return time.Now().Add(40 * time.Minute) }
+	env.server.MaintenanceOnce(context.Background())
+	usage, err = env.store.StorageUsage(context.Background(), env.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Used != 11 || usage.Reserved != 0 || usage.Files != 1 {
+		t.Fatalf("after staging hold release usage = %+v", usage)
 	}
 }
 
@@ -1952,8 +1973,14 @@ func TestUploadRejectsActualSizeMismatch(t *testing.T) {
 		t.Fatalf("intent state = %+v, err = %v", stored, err)
 	}
 	usage, _ := env.store.StorageUsage(context.Background(), time.Now())
-	if usage.Reserved != 0 || usage.Used != 0 {
+	if usage.Reserved != 10 || usage.Used != 0 {
 		t.Fatalf("usage after failed upload = %+v", usage)
+	}
+	env.server.now = func() time.Time { return time.Now().Add(40 * time.Minute) }
+	env.server.MaintenanceOnce(context.Background())
+	usage, _ = env.store.StorageUsage(context.Background(), env.server.now())
+	if usage.Reserved != 0 || usage.Used != 0 {
+		t.Fatalf("usage after failed upload hold release = %+v", usage)
 	}
 }
 
@@ -1982,8 +2009,154 @@ func TestAbortUploadDeletesObjectAndReservation(t *testing.T) {
 		t.Fatalf("intent state = %+v, err = %v", stored, err)
 	}
 	usage, _ := env.store.StorageUsage(context.Background(), time.Now())
-	if usage.Reserved != 0 || usage.Used != 0 {
+	if usage.Reserved != 10 || usage.Used != 0 {
 		t.Fatalf("usage after abort = %+v", usage)
+	}
+	env.server.now = func() time.Time { return time.Now().Add(40 * time.Minute) }
+	env.server.MaintenanceOnce(context.Background())
+	usage, _ = env.store.StorageUsage(context.Background(), env.server.now())
+	if usage.Reserved != 0 || usage.Used != 0 {
+		t.Fatalf("usage after abort hold release = %+v", usage)
+	}
+}
+
+func TestFailedVerificationDeleteFailureKeepsIntentRetryable(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, intent := env.createIntent(t, "", "verify-fail.bin", 10, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent status = %d: %s", status, body)
+	}
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 20), time.Now())
+	env.fake.deleteErr = errors.New("provider unavailable")
+
+	completeStatus, completeBody := env.completeIntent(t, intent.UploadID, intent.UploadToken)
+	if completeStatus != http.StatusRequestEntityTooLarge {
+		t.Fatalf("complete status = %d: %s", completeStatus, completeBody)
+	}
+	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "pending" || stored.Claim != "" {
+		t.Fatalf("intent after failed cleanup = %+v, err = %v", stored, err)
+	}
+	if !env.fake.exists(stagingKey(intent.UploadID)) {
+		t.Fatal("object was removed despite delete failure")
+	}
+}
+
+func TestStagingHoldRemovesRecreatedSinglePutObject(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, intent := env.createIntent(t, "", "held.bin", 10, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent status = %d: %s", status, body)
+	}
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 10), time.Now())
+	request, _ := http.NewRequest(http.MethodDelete, env.http.URL+"/api/v1/uploads/"+intent.UploadID, nil)
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := env.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("abort status = %d", response.StatusCode)
+	}
+
+	// The presigned URL is still valid: simulate a second PUT to the staging
+	// key after the abort response. The hold must account for it and clean it
+	// up once the URL has expired.
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 10), time.Now())
+	usage, _ := env.store.StorageUsage(context.Background(), time.Now())
+	if usage.Reserved != 10 {
+		t.Fatalf("staging hold reservation = %+v", usage)
+	}
+
+	env.server.now = func() time.Time { return time.Now().Add(40 * time.Minute) }
+	env.server.MaintenanceOnce(context.Background())
+	if env.fake.exists(stagingKey(intent.UploadID)) {
+		t.Fatal("recreated staging object survived the hold expiry")
+	}
+	usage, _ = env.store.StorageUsage(context.Background(), env.server.now())
+	if usage.Reserved != 0 {
+		t.Fatalf("staging hold was not released: %+v", usage)
+	}
+}
+
+func TestAbortDuringCompletionDoesNotDeleteObject(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, intent := env.createIntent(t, "", "race.bin", 5, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent status = %d: %s", status, body)
+	}
+	env.fake.putObject(stagingKey(intent.UploadID), []byte("hello"), time.Now())
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	env.fake.beforeCopy = func() {
+		close(entered)
+		<-release
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		status, body := env.completeIntent(t, intent.UploadID, intent.UploadToken)
+		if status != http.StatusCreated {
+			t.Errorf("complete status = %d: %s", status, body)
+		}
+	}()
+	<-entered
+
+	request, _ := http.NewRequest(http.MethodDelete, env.http.URL+"/api/v1/uploads/"+intent.UploadID, nil)
+	request.Header.Set("X-Upload-Token", intent.UploadToken)
+	response, err := env.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("abort during completion = %d, want 409", response.StatusCode)
+	}
+
+	close(release)
+	<-done
+	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "committed" {
+		t.Fatalf("intent state = %+v, err = %v", stored, err)
+	}
+	file, err := env.store.FileByID(context.Background(), intent.UploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !env.fake.exists(file.ObjectKey) {
+		t.Fatal("committed object was deleted by the racing abort")
+	}
+}
+
+func TestFailedObjectDeleteKeepsIntentRetryable(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	status, body, intent := env.createIntent(t, "", "delete-fail.bin", 10, "")
+	if status != http.StatusCreated {
+		t.Fatalf("create intent status = %d: %s", status, body)
+	}
+	env.fake.putObject(stagingKey(intent.UploadID), make([]byte, 10), time.Now())
+	env.fake.deleteErr = errors.New("provider unavailable")
+
+	env.server.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	env.server.MaintenanceOnce(context.Background())
+	stored, err := env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "pending" {
+		t.Fatalf("intent after failed delete = %+v, err = %v", stored, err)
+	}
+	if !env.fake.exists(stagingKey(intent.UploadID)) {
+		t.Fatal("object was removed despite delete failure")
+	}
+
+	env.fake.deleteErr = nil
+	env.server.MaintenanceOnce(context.Background())
+	stored, err = env.store.UploadIntentByID(context.Background(), intent.UploadID)
+	if err != nil || stored.State != "expired" {
+		t.Fatalf("intent after retry = %+v, err = %v", stored, err)
+	}
+	if env.fake.exists(stagingKey(intent.UploadID)) {
+		t.Fatal("object was not removed after retry")
 	}
 }
 

@@ -15,10 +15,14 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
+    concurrency:
+      group: build-push
+      cancel-in-progress: false
 
     steps:
       - name: Checkout repository
@@ -26,6 +30,38 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: target-repo
+          persist-credentials: false
+
+      - name: Validate tags
+        env:
+          INPUT_TAGS: ${{ inputs.tags }}
+        run: |
+          if [[ -z "${INPUT_TAGS// /}" ]]; then
+            echo "tags input must not be empty" >&2
+            exit 1
+          fi
+          IFS=',' read -ra TAG_ARRAY <<< "$INPUT_TAGS"
+          first_tag=""
+          for tag in "${TAG_ARRAY[@]}"; do
+            tag="$(echo "$tag" | xargs)"
+            [[ -z "$tag" ]] && continue
+            if [[ ! "$tag" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+              echo "invalid tag: $tag" >&2
+              exit 1
+            fi
+            if [[ -z "$first_tag" ]]; then
+              first_tag="$tag"
+            fi
+          done
+          if [[ -z "$first_tag" ]]; then
+            echo "tags input contained no usable tags" >&2
+            exit 1
+          fi
+          echo "IMAGE_VERSION=$first_tag" >> "$GITHUB_ENV"
+
+      - name: Build metadata
+        run: |
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Record commit info
         run: |
@@ -94,7 +130,9 @@ jobs:
             org.opencontainers.image.url=${{ env.REPO_URL }}
             org.opencontainers.image.source=${{ env.REPO_URL }}
             org.opencontainers.image.revision=${{ env.REPO_COMMIT }}
-            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
+            org.opencontainers.image.created=${{ env.BUILD_DATE }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

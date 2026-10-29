@@ -3,12 +3,16 @@
 Temporary file hosting on S3-compatible storage. Uploads are public by default
 and can be locked down to admin-approved user hashes with
 `PUBLIC_UPLOADS_ENABLED=false`. Every file expires after the configured
-`RETENTION` period (7 days by default), optionally sliding from the last
-download, and downloads are served through short-lived URLs from a private
-bucket.
+`RETENTION` period by default (admin-issued hashes can override it), optionally
+sliding from the last download, and downloads are served through short-lived
+URLs from a private bucket.
 
 Built in Go with SQLite metadata, a server-rendered web UI, a full REST API, and
 Docker as the primary deployment target.
+
+> Public uploads are enabled by default. If you do not want anonymous uploads,
+> set `PUBLIC_UPLOADS_ENABLED=false` before exposing the instance, and review the
+> abuse and content-handling notes in [Security](docs/security.md).
 
 ## Features
 
@@ -52,7 +56,10 @@ container is running.
   [Security model](docs/security.md)
 - **Usage:** [API](docs/api.md) · [Web UI and browser history](docs/web-ui.md) ·
   [Admin](docs/admin.md)
-- **Contributing:** [Development](docs/development.md)
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) ·
+  [Development](docs/development.md)
+- **Project:** [Security policy](SECURITY.md) · [AGPL-3.0 License](LICENSE) ·
+  [Code of conduct](CODE_OF_CONDUCT.md)
 - **All documentation:** [docs/README.md](docs/README.md)
 - **Cloudflare Worker setup:** [worker/README.md](worker/README.md)
 
@@ -61,8 +68,21 @@ container is running.
 ```sh
 go test ./...
 go vet ./...
+gofmt -l .
 go run ./cmd/interim
+```
+
+Or install the binary:
+
+```sh
+go install github.com/driftywinds/interim/cmd/interim@latest
 ```
 
 Go 1.27 is used in the Docker image. See [Development](docs/development.md) for
 the test coverage and direct-build command.
+
+## License
+
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+
+Copyright (C) 2026 interim contributors.

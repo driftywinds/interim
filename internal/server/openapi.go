@@ -7,7 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	webassets "interim/web"
+	webassets "github.com/driftywinds/interim/web"
 )
 
 func (s *Server) openAPISpec() (string, error) {

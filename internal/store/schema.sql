@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS upload_intents (
     created_at         INTEGER NOT NULL,
     expires_at         INTEGER NOT NULL,
     completed_at       INTEGER,
-    file_id            TEXT
+    file_id            TEXT,
+    claim              TEXT NOT NULL DEFAULT '',
+    claim_at           INTEGER NOT NULL DEFAULT 0,
+    staging_hold_until INTEGER NOT NULL DEFAULT 0,
+    url_expires_at     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS upload_intents_state_expires ON upload_intents(state, expires_at);

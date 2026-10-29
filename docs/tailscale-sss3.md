@@ -13,6 +13,12 @@ browser
   -> 127.0.0.1:5553
      home: Caddy, CORS, Host preservation
   -> sss3
+
+interim server-side S3 calls
+  -> 100.x.y.z:5555
+     Tailscale Serve (tailnet only, no header stripping)
+  -> 127.0.0.1:5556
+     sss3 directly
 ```
 
 The public entry point is a small VPS. The home machine makes only an outbound
@@ -75,15 +81,25 @@ tailscale serve status
 tailscale ip -4
 ```
 
-`5554` is the tailnet-facing port; `5553` is the local Caddy port. The command
-prints the tailnet name and the `100.x.y.z` IPv4 address. Keep that address for
-the VPS configuration. If Tailscale asks you to enable HTTPS certificates for
-the tailnet, accept it.
+`5553` is the home Caddy listener. The compose file also publishes sss3
+directly on `127.0.0.1:5556`; expose that on a separate tailnet port so
+server-side SigV4 requests never pass through Caddy:
+
+```sh
+sudo tailscale serve --bg --tcp=5555 tcp://127.0.0.1:5556
+```
+
+`5555` is the tailnet-facing direct sss3 port. Keep `127.0.0.1:5556` loopback
+only; do not publish it publicly. The direct route is required because Caddy
+strips every `X-Amz-*` request header, including `X-Amz-Date`, which would break
+`HeadObject`, `CopyObject`, `ListParts`, and deletes. Never remove
+`header_up -X-Amz-*` from the browser-facing listener to make a route work.
 
 The Serve mapping is persistent across reboots because of `--bg`. To remove it:
 
 ```sh
 sudo tailscale serve --tcp=5554 off
+sudo tailscale serve --tcp=5555 off
 ```
 
 `INTERIM_ORIGIN` in `.env.sss3` must exactly match the origin serving the
@@ -113,6 +129,7 @@ Verify tailnet reachability from the VPS:
 ```sh
 tailscale ping 100.x.y.z
 nc -vz 100.x.y.z 5554
+nc -vz 100.x.y.z 5555
 ```
 
 Add a site block to the VPS Caddyfile. If Caddy already serves other sites,
@@ -158,7 +175,7 @@ for server-side calls:
 PUBLIC_BASE_URL=https://interim.example.com
 
 S3_PUBLIC_ENDPOINT=https://sss3.example.com
-S3_ENDPOINT=http://100.x.y.z:5554
+S3_ENDPOINT=http://100.x.y.z:5555
 
 S3_REGION=us-east-1
 S3_BUCKET=interim
@@ -176,14 +193,14 @@ Important details:
 - `S3_PUBLIC_ENDPOINT` is embedded in browser presigned PUT/GET URLs. It must
   be the public VPS hostname.
 - `S3_ENDPOINT` is used by interim for `HeadObject`, `CopyObject`,
-  `ListParts`, `ListObjectsV2`, and deletes. It must use the tailnet address or
-  another direct/private route, never the public VPS Caddy. The public proxy
-  strips `X-Amz-Copy-Source`, so it cannot complete a single-PUT staging-to-live
-  copy; multipart uses the staging key as the live object. If interim cannot
-  reach the tailnet, place it on the tailnet or provide a private route.
+  `ListParts`, `ListObjectsV2`, and deletes. It must use the **direct sss3**
+  tailnet port (`5555` in this guide), never the public VPS Caddy and never the
+  home Caddy on `5554`. Caddy strips every `X-Amz-*` request header, including
+  `X-Amz-Date`, so server-side signing fails through it. If interim cannot reach
+  the tailnet, place it on the tailnet or provide a private route.
 - If interim shares a Docker network with sss3, `S3_ENDPOINT` can instead be
-  `http://stupid-simple-s3:5553`. If it points at the Caddy container, use the
-  Caddy port and keep `{http.request.hostport}`.
+  `http://stupid-simple-s3:5553`. Do not point `S3_ENDPOINT` at the Caddy
+  container; that path is only for browsers and always strips `X-Amz-*`.
 - The app's CSP already includes `S3_PUBLIC_ENDPOINT`, so no code change is
   needed for the browser to reach the new public S3 hostname.
 - `S3_BUCKET` must exactly match sss3's `STUPID_BUCKET_NAME` in `.env.sss3`.
@@ -223,12 +240,15 @@ interim UI.
 
 Useful checks:
 
-- `tailscale serve status` on the home machine should show
-  `tcp://100.x.y.z:5554 -> tcp://127.0.0.1:5553`.
+- `tailscale serve status` on the home machine should show both
+  `tcp://100.x.y.z:5554 -> tcp://127.0.0.1:5553` and
+  `tcp://100.x.y.z:5555 -> tcp://127.0.0.1:5556`.
 - `tailscale ping 100.x.y.z` shows whether traffic is direct or relayed. DERP
   relay works, but direct is faster for large files.
 - The object should appear under the sss3 data directory on the home machine.
 - `curl -I` should not show `server: cloudflare` for the S3 hostname.
+- From the VPS, `nc -vz 100.x.y.z 5555` must succeed. If it does not, server-side
+  S3 operations fail even though browser uploads still work through `5554`.
 
 ## Troubleshooting this route
 
@@ -252,9 +272,9 @@ Useful checks:
 
 ## Operational notes
 
-- Tailscale ACLs should allow only the VPS to reach the home machine on TCP
-  `5554`. The public internet reaches only the VPS Caddy; sss3 remains
-  tailnet-only.
+- Tailscale ACLs should allow the VPS to reach the home machine on TCP `5554`
+  (browser path) and TCP `5555` (interim server-side S3 path). The public
+  internet reaches only the VPS Caddy; sss3 remains tailnet-only.
 - The VPS relays every upload and download, so its monthly traffic allowance
   and bandwidth matter. The home disk still stores the bytes.
 - Tailscale Serve is tailnet-only. Do not use Tailscale Funnel for this route;
@@ -265,5 +285,6 @@ Useful checks:
   `MAX_FILE_SIZE` at or below that, or raise it and `STUPID_MAX_OBJECT_SIZE`.
   Raise `STUPID_MAX_PART_SIZE` together with `MULTIPART_PART_SIZE` if the
   effective part size grows for very large files. If sss3 rejects normal part
-  PUTs with `SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` and
-  rely on the provider-side part-size cap.
+  PUTs with `SignatureDoesNotMatch`, set `MULTIPART_SIGN_PART_LENGTH=false` only
+  as a last resort and keep the provider-side part-size cap exactly aligned with
+  interim's `MULTIPART_PART_SIZE`.

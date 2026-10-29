@@ -1,12 +1,12 @@
 # CORS proxy for stupid-simple-s3.
 #
-# Cloudflare Tunnel should point sss3.drifty.win at this listener:
+# Cloudflare Tunnel should point sss3.example.com at this listener:
 #   http://localhost:5553
 #
 # The container listens on :8080; compose publishes it as 5553 on the host.
 #
 # SigV4 signs the Host header. reverse_proxy preserves the incoming public Host
-# so sss3 sees "sss3.drifty.win" even though Cloudflare connects to localhost.
+# so sss3 sees "sss3.example.com" even though Cloudflare connects to localhost.
 
 :8080 {
 	# A presigned PutObject must never be able to switch into CopyObject or

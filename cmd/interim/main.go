@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"interim/internal/config"
-	"interim/internal/objects"
-	"interim/internal/server"
-	"interim/internal/store"
+	"github.com/driftywinds/interim/internal/config"
+	"github.com/driftywinds/interim/internal/objects"
+	"github.com/driftywinds/interim/internal/server"
+	"github.com/driftywinds/interim/internal/store"
 )
 
 func isLocalOrigin(raw string) bool {
@@ -59,6 +59,9 @@ func main() {
 	}
 	if cfg.S3.PublicEndpoint != "" && !isLocalOrigin(cfg.S3.PublicEndpoint) && strings.HasPrefix(cfg.S3.PublicEndpoint, "http://") {
 		logger.Warn("S3_PUBLIC_ENDPOINT is plain HTTP; presigned upload signatures can be observed in transit", "endpoint", cfg.S3.PublicEndpoint)
+	}
+	if cfg.S3.PublicEndpointBlocksCopy && cfg.S3.PutAccessKey == "" {
+		logger.Warn("S3_PUBLIC_ENDPOINT_BLOCKS_COPY is an operator assertion; configure write-only S3_PUT_ACCESS_KEY/S3_PUT_SECRET_KEY to make multipart copy protection independent of the proxy")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

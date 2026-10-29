@@ -8,8 +8,8 @@ import (
 	"net/netip"
 	"time"
 
-	"interim/internal/store"
-	"interim/internal/units"
+	"github.com/driftywinds/interim/internal/store"
+	"github.com/driftywinds/interim/internal/units"
 )
 
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +41,11 @@ func (s *Server) handleFilePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expired := !file.ExpiresAt.After(s.now())
+	if expired {
+		// Do not disclose the filename, size, or dates of an expired file.
+		s.renderError(w, r, http.StatusGone, "Expired", "This file has been permanently deleted.")
+		return
+	}
 	page := s.basePage(r, file.OriginalName, "")
 	retention := s.fileRetention(file)
 	page.RetentionLabel = retentionLabel(retention)
@@ -98,7 +103,7 @@ func (s *Server) handlePageDownload(w http.ResponseWriter, r *http.Request) {
 
 	url, _, err := s.downloadURL(r.Context(), file)
 	if err != nil {
-		s.logger.Error("create page download link", "file_id", file.ID, "error", err)
+		s.logger.Error("create page download link", "file_id", s.logID(file.ID), "error", err)
 		s.renderError(w, r, http.StatusBadGateway, "Download unavailable", "The storage provider did not return a download link. Please try again.")
 		return
 	}
@@ -126,9 +131,14 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if allowed, retry := s.limiter.allow("health:"+s.clientIP(r), 60, time.Minute); !allowed {
+		w.Header().Set("Retry-After", retryString(retry))
+		s.writeJSON(w, http.StatusTooManyRequests, map[string]string{"status": "rate_limited"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	detail := s.loopbackRequest(r)
+	detail := !s.cfg.TrustProxy && s.loopbackRequest(r)
 	if _, err := s.store.StorageUsage(ctx, s.now()); err != nil {
 		body := map[string]string{"status": "error"}
 		if detail {
@@ -157,22 +167,19 @@ func (s *Server) loopbackRequest(r *http.Request) bool {
 }
 
 // cachedStorageHealth protects the public health endpoint from turning into an
-// unbounded HeadBucket amplifier.
+// unbounded HeadBucket amplifier. The mutex is held across the probe so a burst
+// arriving after the cache expires still results in one provider call.
 func (s *Server) cachedStorageHealth(ctx context.Context) error {
 	now := s.now()
 	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
 	if !s.healthChecked.IsZero() && now.Sub(s.healthChecked) < 10*time.Second {
-		err := s.healthErr
-		s.healthMu.Unlock()
-		return err
+		return s.healthErr
 	}
-	s.healthMu.Unlock()
 
 	err := s.objects.Health(ctx)
-	s.healthMu.Lock()
 	s.healthChecked = now
 	s.healthErr = err
-	s.healthMu.Unlock()
 	return err
 }
 

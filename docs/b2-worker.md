@@ -21,7 +21,7 @@ Configure interim:
 ```dotenv
 DOWNLOAD_WORKER_ENABLED=true
 DOWNLOAD_WORKER_URLS=https://dl1.example.com,https://dl2.example.com
-DOWNLOAD_WORKER_SECRET=<openssl rand -base64 48>
+DOWNLOAD_WORKER_SECRET=replace-with-openssl-rand-base64-48
 
 S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com
 S3_PUBLIC_ENDPOINT=https://s3.us-west-004.backblazeb2.com

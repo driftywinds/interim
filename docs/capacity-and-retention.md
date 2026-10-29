@@ -62,6 +62,22 @@ still counts toward `MAX_STORAGE` and `MAX_FILES`, and the admin can delete it
 manually. Sliding retention uses the per-file snapshot; a file from a hash with
 `retention=0` is never extended or expired.
 
+### Single-PUT staging hold
+
+A presigned single-PUT URL is a bearer capability that S3 cannot revoke. After a
+single-PUT upload completes or aborts, the staging key can still be recreated
+until `UPLOAD_URL_TTL` expires. interim therefore keeps the reservation and
+protects the staging key until that deadline, then the janitor deletes any
+recreated object and releases the reservation. This keeps the bytes inside
+`MAX_STORAGE` instead of letting them become invisible.
+
+The practical effect is that a completed single-PUT file can briefly count
+twice: once as the committed file and once as the held reservation. Uploads near
+`MAX_STORAGE` may need to wait for the hold to expire. Lowering
+`UPLOAD_URL_TTL` shortens the hold; multipart uploads do not need one because
+abort/completion invalidates the multipart upload ID and its part URLs. The
+staging hold is not a substitute for a bucket lifecycle rule.
+
 ### Sliding retention from the last download
 
 Set `RETENTION_EXTEND_ON_DOWNLOAD=true` to make retention relative to the last

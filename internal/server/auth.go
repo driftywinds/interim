@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"interim/internal/store"
+	"github.com/driftywinds/interim/internal/store"
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{3,32}$`)

@@ -43,7 +43,10 @@ Start with [Quick start](quickstart.md) if you want a running instance, or read
 
 | Guide | Contents |
 | --- | --- |
+| [Contributing](../CONTRIBUTING.md) | Development workflow and repository rules. |
 | [Development](development.md) | Tests, vet, local runs, and direct builds. |
+| [Security policy](../SECURITY.md) | Private vulnerability reporting and scope. |
+| [License](../LICENSE) | GNU AGPL v3.0 license terms. |
 
 The Cloudflare Worker has its own deployment guide in
 [worker/README.md](../worker/README.md).

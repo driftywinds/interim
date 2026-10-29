@@ -14,8 +14,9 @@
   the same URL cannot overwrite the committed object. Multipart requires either
   a write-only upload identity or an explicit
   `S3_PUBLIC_ENDPOINT_BLOCKS_COPY=true` assertion for a proxy that strips every
-  `X-Amz-*` request header. Browser resume metadata stores the upload token in
-  `localStorage`, so it has the same sensitivity as the delete token.
+  `X-Amz-*` request header. That flag is trusted, not verified; the write-only
+  identity is the robust option. Browser resume metadata stores the upload token
+  in `localStorage`, so it has the same sensitivity as the delete token.
 - Download links are short-lived signed S3 GETs or worker-proxied token URLs;
   objects are private.
 - User hashes, upload tokens, and delete tokens are hashed at rest.
@@ -29,7 +30,9 @@
   verified with `HeadObject` on a staging key, then copied to a live key that
   the client never sees. The copy carries `CopySourceIfMatch` with the verified
   ETag, closing the Head/Copy race. A committed file cannot be overwritten with
-  the still-valid staging PUT URL.
+  the still-valid staging PUT URL. The staging key itself is protected and its
+  reservation is held until that URL expires, so a post-terminal PUT cannot
+  create untracked bytes outside `MAX_STORAGE`.
 - Multipart completion requires every part number from 1 through `part_count` to
   be recorded with its exact expected size. Part URLs sign Content-Length by
   default, and completion verifies provider-side sizes/ETags with `ListParts`
@@ -63,7 +66,7 @@
   keys, so rotating within a /64 does not reset the counters.
 - When `TRUSTED_CLIENT_IP_HEADER` is set, that header is used only after the
   connecting peer matches `TRUSTED_PROXY_CIDRS`, then the value must parse as an
-  IP. This covers proxies such as Charon/Caddy that overwrite
+  IP. This covers reverse proxies that overwrite
   `X-Forwarded-For` with their own peer address but pass
   `CF-Connecting-IP` unchanged. Do not set it to a client-supplied header on an
   origin that is reachable without the trusted proxy.

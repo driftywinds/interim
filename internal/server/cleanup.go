@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"time"
-
-	"interim/internal/store"
 )
 
 const (
@@ -30,39 +28,137 @@ func (s *Server) cleanupExpiredUploadIntents(ctx context.Context) (int, error) {
 			break
 		}
 		for _, intent := range intents {
+			claimed, err := s.store.ClaimUploadIntent(ctx, intent.ID, claimExpiring, now)
+			if err != nil {
+				s.logger.Error("janitor could not claim expired upload", "upload_id", s.logID(intent.ID), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if !claimed {
+				continue
+			}
 			if err := s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID); err != nil {
-				s.logger.Error("janitor could not abort expired multipart upload", "upload_id", intent.ID, "error", err)
+				s.logger.Error("janitor could not abort expired multipart upload", "upload_id", s.logID(intent.ID), "error", err)
+				s.releaseUploadClaim(intent.ID, claimExpiring)
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
 			deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			err := s.objects.Delete(deleteCtx, intent.ObjectKey)
+			err = s.objects.Delete(deleteCtx, intent.ObjectKey)
 			cancel()
 			if err != nil {
-				s.logger.Error("janitor could not delete expired upload object", "upload_id", intent.ID, "error", err)
+				s.logger.Error("janitor could not delete expired upload object", "upload_id", s.logID(intent.ID), "error", err)
+				s.releaseUploadClaim(intent.ID, claimExpiring)
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
-			if err := s.store.CloseUploadIntent(ctx, intent.ID, "expired", now); err != nil {
-				if !errors.Is(err, store.ErrNotFound) {
-					s.logger.Error("janitor could not close expired upload intent", "upload_id", intent.ID, "error", err)
-					if firstErr == nil {
-						firstErr = err
-					}
+			closed, err := s.store.CloseUploadIntent(ctx, intent.ID, claimExpiring, "expired", now, s.stagingHoldUntil(intent))
+			if err != nil {
+				s.logger.Error("janitor could not close expired upload intent", "upload_id", s.logID(intent.ID), "error", err)
+				s.releaseUploadClaim(intent.ID, claimExpiring)
+				if firstErr == nil {
+					firstErr = err
 				}
 				continue
 			}
-			total++
+			if closed {
+				total++
+			} else {
+				s.releaseUploadClaim(intent.ID, claimExpiring)
+			}
 		}
 		if len(intents) < janitorBatchSize {
 			break
 		}
 	}
 	return total, firstErr
+}
+
+func (s *Server) cleanupStagingHolds(ctx context.Context) (int, error) {
+	total := 0
+	var firstErr error
+	for batch := 0; batch < janitorBatchesPerPass; batch++ {
+		intents, err := s.store.ExpiredStagingHolds(ctx, s.now(), janitorBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if len(intents) == 0 {
+			break
+		}
+		progress := 0
+		for _, intent := range intents {
+			deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := s.objects.Delete(deleteCtx, intent.ObjectKey)
+			cancel()
+			if err != nil {
+				s.logger.Error("janitor could not delete held staging object", "upload_id", s.logID(intent.ID), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if err := s.store.FinishStagingHold(ctx, intent.ID); err != nil {
+				s.logger.Error("janitor could not finish staging hold", "upload_id", s.logID(intent.ID), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			progress++
+			total++
+		}
+		if len(intents) < janitorBatchSize || progress == 0 {
+			break
+		}
+	}
+	return total, firstErr
+}
+
+func (s *Server) recoverStaleUploadClaims(ctx context.Context) {
+	now := s.now().UTC()
+	intents, err := s.store.StaleUploadClaims(ctx, now.Add(-abortClaimTTL), 100)
+	if err != nil {
+		s.logger.Warn("stale upload claim scan failed", "error", err)
+		return
+	}
+	for _, intent := range intents {
+		if intent.Claim == claimCompleting {
+			if now.Sub(intent.ClaimAt) < completionClaimTTL {
+				continue
+			}
+			s.logger.Warn("releasing stale completion claim", "upload_id", s.logID(intent.ID))
+			s.releaseUploadClaim(intent.ID, claimCompleting)
+			continue
+		}
+		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		abortErr := s.abortMultipartObject(intent.ObjectKey, intent.MultipartUploadID)
+		if abortErr == nil {
+			abortErr = s.objects.Delete(deleteCtx, intent.ObjectKey)
+		}
+		cancel()
+		if abortErr != nil {
+			s.logger.Error("stale upload claim cleanup failed", "upload_id", s.logID(intent.ID), "error", abortErr)
+			continue
+		}
+		state := "expired"
+		if intent.Claim == claimAborting {
+			state = "aborted"
+		}
+		closed, closeErr := s.store.CloseUploadIntent(ctx, intent.ID, intent.Claim, state, now, s.stagingHoldUntil(intent))
+		if closeErr != nil {
+			s.logger.Error("stale upload claim close failed", "upload_id", s.logID(intent.ID), "error", closeErr)
+			continue
+		}
+		if !closed {
+			s.releaseUploadClaim(intent.ID, intent.Claim)
+		}
+	}
 }
 
 func (s *Server) cleanupTerminalUploadIntents(ctx context.Context) (int64, error) {
@@ -155,66 +251,77 @@ func (s *Server) deepSweep(ctx context.Context, startup bool) (int, error) {
 		err := s.objects.AbortMultipart(abortCtx, upload.Key, upload.UploadID)
 		cancel()
 		if err != nil {
-			s.logger.Error("janitor could not abort orphan multipart upload", "key", upload.Key, "upload_id", upload.UploadID, "error", err)
+			s.logger.Error("janitor could not abort orphan multipart upload", "key", upload.Key, "upload_id", s.logID(upload.UploadID), "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		s.logger.Warn("janitor aborted orphan multipart upload", "key", upload.Key, "upload_id", upload.UploadID)
+		s.logger.Warn("janitor aborted orphan multipart upload", "key", upload.Key, "upload_id", s.logID(upload.UploadID))
 	}
 	return deleted, firstErr
 }
 
 func (s *Server) cleanupExpiredFiles(ctx context.Context) (int, error) {
-	files, err := s.store.ExpiredFiles(ctx, s.now(), 100)
-	if err != nil {
-		return 0, err
-	}
 	deleted := 0
 	var firstErr error
-	for _, file := range files {
-		// Claim the expired row before touching the object. ClaimExpiredFile
-		// only succeeds while deleting_at is NULL and the row is still expired;
-		// a concurrent download extension makes the claim lose, so the object
-		// is left alone.
-		claimed, err := s.store.ClaimExpiredFile(ctx, file.ID, s.now())
+	for batch := 0; batch < janitorBatchesPerPass; batch++ {
+		files, err := s.store.ExpiredFiles(ctx, s.now(), janitorBatchSize)
 		if err != nil {
-			s.logger.Error("claim expired file", "file_id", file.ID, "error", err)
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+			return deleted, err
 		}
-		if !claimed {
-			continue
+		if len(files) == 0 {
+			break
 		}
-		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = s.objects.Delete(deleteCtx, file.ObjectKey)
-		cancel()
-		if err != nil {
-			s.logger.Error("delete expired object", "file_id", file.ID, "key", file.ObjectKey, "error", err)
-			if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
-				s.logger.Error("release expired file claim", "file_id", file.ID, "error", releaseErr)
+		progress := 0
+		for _, file := range files {
+			// Claim the expired row before touching the object. ClaimExpiredFile
+			// only succeeds while deleting_at is NULL and the row is still expired;
+			// a concurrent download extension makes the claim lose, so the object
+			// is left alone.
+			claimed, err := s.store.ClaimExpiredFile(ctx, file.ID, s.now())
+			if err != nil {
+				s.logger.Error("claim expired file", "file_id", s.logID(file.ID), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
-			if firstErr == nil {
-				firstErr = err
+			if !claimed {
+				progress++
+				continue
 			}
-			continue
+			deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err = s.objects.Delete(deleteCtx, file.ObjectKey)
+			cancel()
+			if err != nil {
+				s.logger.Error("delete expired object", "file_id", s.logID(file.ID), "key", file.ObjectKey, "error", err)
+				if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
+					s.logger.Error("release expired file claim", "file_id", s.logID(file.ID), "error", releaseErr)
+				}
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			removed, err := s.store.FinishFileDeletion(ctx, file.ID)
+			if err != nil {
+				s.logger.Error("finish expired file deletion", "file_id", s.logID(file.ID), "error", err)
+				if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
+					s.logger.Error("release expired file claim", "file_id", s.logID(file.ID), "error", releaseErr)
+				}
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if removed {
+				deleted++
+				progress++
+			}
 		}
-		removed, err := s.store.FinishFileDeletion(ctx, file.ID)
-		if err != nil {
-			s.logger.Error("finish expired file deletion", "file_id", file.ID, "error", err)
-			if releaseErr := s.store.ReleaseFileDeletion(ctx, file.ID); releaseErr != nil {
-				s.logger.Error("release expired file claim", "file_id", file.ID, "error", releaseErr)
-			}
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if removed {
-			deleted++
+		if len(files) < janitorBatchSize || progress == 0 {
+			break
 		}
 	}
 	return deleted, firstErr
@@ -223,10 +330,16 @@ func (s *Server) cleanupExpiredFiles(ctx context.Context) (int, error) {
 // MaintenanceOnce is the fast lane: expired intents, expired files, sessions,
 // and old terminal intent rows. It runs every minute and at startup.
 func (s *Server) MaintenanceOnce(ctx context.Context) {
+	s.recoverStaleUploadClaims(ctx)
 	if count, err := s.cleanupExpiredUploadIntents(ctx); err != nil {
 		s.logger.Warn("expired upload intent cleanup incomplete", "error", err)
 	} else if count > 0 {
 		s.logger.Info("janitor expired uploads", "count", count)
+	}
+	if count, err := s.cleanupStagingHolds(ctx); err != nil {
+		s.logger.Warn("staging hold cleanup incomplete", "error", err)
+	} else if count > 0 {
+		s.logger.Info("janitor released staging holds", "count", count)
 	}
 	if deleted, err := s.cleanupExpiredFiles(ctx); err != nil {
 		s.logger.Warn("expired file cleanup incomplete", "error", err)
