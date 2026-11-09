@@ -57,6 +57,8 @@ coverage.html
 
 # Local development / research artifacts
 /.research/
+# Local agent notes and skills (for example the interim-docs reminder)
+/.local/
 /.gocache/
 /.gotmp/
 /.tmp/

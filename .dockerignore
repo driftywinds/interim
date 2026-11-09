@@ -6,6 +6,7 @@
 !.env.example
 data
 .research
+.local
 .gocache
 .gotmp
 .tmp
