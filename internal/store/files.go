@@ -14,7 +14,7 @@ var (
 )
 
 const fileColumns = `f.id, f.object_key, f.api_key_id, f.original_name, f.content_type,
-	f.size, f.delete_token_hash, f.created_at, f.expires_at, f.retention_seconds, f.deleting_at`
+	f.size, f.view_count, f.download_count, f.delete_token_hash, f.created_at, f.expires_at, f.retention_seconds, f.deleting_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -27,7 +27,7 @@ func scanFile(scanner rowScanner) (File, error) {
 	var retention, deleting sql.NullInt64
 	err := scanner.Scan(
 		&file.ID, &file.ObjectKey, &apiKeyID, &file.OriginalName, &file.ContentType,
-		&file.Size, &file.DeleteTokenHash, &created, &expires, &retention, &deleting,
+		&file.Size, &file.Views, &file.Downloads, &file.DeleteTokenHash, &created, &expires, &retention, &deleting,
 	)
 	if err != nil {
 		return File{}, err
@@ -136,6 +136,31 @@ func (s *Store) FileByID(ctx context.Context, id string) (File, error) {
 		return File{}, fmt.Errorf("get file: %w", err)
 	}
 	return file, nil
+}
+
+func (s *Store) IncrementFileViews(ctx context.Context, id string) error {
+	return s.incrementFileCounter(ctx, id, "view_count")
+}
+
+func (s *Store) IncrementFileDownloads(ctx context.Context, id string) error {
+	return s.incrementFileCounter(ctx, id, "download_count")
+}
+
+func (s *Store) incrementFileCounter(ctx context.Context, id, column string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE files SET "+column+" = "+column+" + 1 WHERE id = ?", id,
+	)
+	if err != nil {
+		return fmt.Errorf("increment %s: %w", column, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("increment %s rows: %w", column, err)
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ExtendFileExpiry moves a file's expiry forward. The UPDATE only matches a
@@ -299,8 +324,9 @@ func (s *Store) ListFilesAdmin(ctx context.Context, filter FileFilter) ([]AdminF
 		var retention, deleting sql.NullInt64
 		if err := rows.Scan(
 			&adminFile.ID, &adminFile.ObjectKey, &apiKeyID, &adminFile.OriginalName,
-			&adminFile.ContentType, &adminFile.Size, &adminFile.DeleteTokenHash,
-			&created, &expires, &retention, &deleting, &adminFile.KeyPrefix, &adminFile.KeyName,
+			&adminFile.ContentType, &adminFile.Size, &adminFile.Views, &adminFile.Downloads,
+			&adminFile.DeleteTokenHash, &created, &expires, &retention, &deleting,
+			&adminFile.KeyPrefix, &adminFile.KeyName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan admin file: %w", err)
 		}

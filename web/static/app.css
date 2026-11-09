@@ -659,6 +659,12 @@ table.fs .row-actions {
     margin-top: 16px;
 }
 
+.file-stats {
+    margin: 10px 0 0;
+    font-size: 0.95rem;
+    color: var(--muted);
+}
+
 .download-back {
     margin-top: 18px;
 }

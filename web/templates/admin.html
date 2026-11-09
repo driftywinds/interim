@@ -53,6 +53,8 @@
                     <th><input type="checkbox" id="select-all" aria-label="Select all files"></th>
                     <th>File</th>
                     <th>Size</th>
+                    <th>Views</th>
+                    <th>Downloads</th>
                     <th>Uploader</th>
                     <th>Created</th>
                     <th>Expires</th>
@@ -68,6 +70,8 @@
                             <div class="muted"><code>{{.ID}}</code></div>
                         </td>
                         <td>{{bytes .Size}}</td>
+                        <td>{{.Views}}</td>
+                        <td>{{.Downloads}}</td>
                         <td>{{if .KeyPrefix}}<code>{{maskPrefix .KeyPrefix}}</code>{{else}}<span class="muted">anonymous</span>{{end}}</td>
                         <td>{{date .CreatedAt}}</td>
                         <td>{{if never .ExpiresAt}}<span class="muted">never</span>{{else if .ExpiresAt.Before $.Now}}<span class="text-danger">expired</span>{{else}}{{datetime .ExpiresAt}}{{end}}</td>
@@ -79,7 +83,7 @@
                         </td>
                     </tr>
                 {{else}}
-                    <tr><td colspan="7" class="muted">No files found.</td></tr>
+                    <tr><td colspan="9" class="muted">No files found.</td></tr>
                 {{end}}
                 </tbody>
             </table>

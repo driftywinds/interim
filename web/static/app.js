@@ -98,7 +98,7 @@
         const button = $("#download-button");
         if (button) {
             button.addEventListener("click", () => {
-                button.textContent = "Creating signed link…";
+                button.textContent = "Preparing download…";
                 button.classList.add("is-loading");
             });
         }
@@ -474,7 +474,7 @@
                 const reserved = $("#storage-reserved");
                 if (reserved) {
                     reserved.textContent = Number(storage.reserved_bytes) > 0
-                        ? " · " + formatBytes(storage.reserved_bytes) + " reserved by active uploads"
+                        ? " · " + formatBytes(storage.reserved_bytes) + " in progress"
                         : "";
                 }
             }
@@ -889,7 +889,7 @@
                     // of truth.
                 }
             });
-            updateTask(task, "Uploading directly to storage · " + formatBytes(task.file.size), 0, false);
+            updateTask(task, "Uploading · " + formatBytes(task.file.size), 0, false);
 
             xhr.upload.addEventListener("progress", (event) => {
                 if (!event.lengthComputable) return;
@@ -909,7 +909,7 @@
                     return;
                 }
                 task.status = "failed";
-                const message = "Upload to storage failed (HTTP " + xhr.status + ").";
+                const message = "Upload failed (HTTP " + xhr.status + ").";
                 updateTask(task, message, 100, true);
                 showError(message);
                 abortUploadIntent(intent, false);
@@ -918,7 +918,7 @@
 
             xhr.addEventListener("error", () => {
                 task.status = "failed";
-                const message = "Upload to storage failed. Check the bucket CORS policy and public endpoint.";
+                const message = "Upload failed. Check your connection and try again.";
                 updateTask(task, message, 0, true);
                 showError(message);
                 abortUploadIntent(intent, false);
@@ -1069,7 +1069,7 @@
                     if (xhr.status >= 200 && xhr.status < 300) {
                         const etag = xhr.getResponseHeader("ETag");
                         if (!etag) {
-                            const err = new Error("Storage did not expose the part ETag. Check the bucket CORS ExposeHeaders setting.");
+                            const err = new Error("The upload did not complete correctly. Try again.");
                             err.fatal = true;
                             reject(err);
                             return;
@@ -1081,7 +1081,7 @@
                 });
                 xhr.addEventListener("error", () => {
                     task.xhrs.delete(xhr);
-                    reject(new Error("Part " + partNumber + " upload failed. Check the bucket CORS policy."));
+                    reject(new Error("Part " + partNumber + " failed. Retrying may help."));
                 });
                 xhr.addEventListener("abort", () => {
                     task.xhrs.delete(xhr);
@@ -1113,7 +1113,7 @@
 
         async function finishMultipart(task, session) {
             task.status = "completing";
-            updateTask(task, "Assembling multipart upload…", 100, false);
+            updateTask(task, "Finishing upload…", 100, false);
             const file = await completeUploadIntent({
                 complete_url: session.completeURL,
                 upload_token: session.uploadToken,

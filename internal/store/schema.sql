@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS files (
     original_name     TEXT NOT NULL,
     content_type      TEXT NOT NULL,
     size              INTEGER NOT NULL CHECK (size > 0),
+    view_count        INTEGER NOT NULL DEFAULT 0,
+    download_count    INTEGER NOT NULL DEFAULT 0,
     delete_token_hash BLOB NOT NULL,
     created_at        INTEGER NOT NULL,
     expires_at        INTEGER NOT NULL,

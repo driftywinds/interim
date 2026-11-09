@@ -55,6 +55,11 @@ func (s *Server) handleFilePage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		page.Description = fmt.Sprintf("Download %s from interim. Available for %s.", file.OriginalName, page.RetentionLabel)
 	}
+	if err := s.store.IncrementFileViews(r.Context(), file.ID); err != nil {
+		s.logger.Warn("increment file views", "file_id", s.logID(file.ID), "error", err)
+	} else {
+		file.Views++
+	}
 	view := FilePageView{
 		PageData:          page,
 		ID:                file.ID,
@@ -67,8 +72,9 @@ func (s *Server) handleFilePage(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn:         expiresIn(file.ExpiresAt),
 		NeverExpires:      neverExpiresAt(file.ExpiresAt),
 		FileRetentionRule: s.retentionRule(retention),
+		Views:             file.Views,
+		Downloads:         file.Downloads,
 		PageURL:           s.pageURL(file.ID),
-		DownloadTTL:       humanDuration(s.cfg.DownloadTTL),
 		IsExpired:         expired,
 	}
 	status := http.StatusOK
@@ -108,6 +114,9 @@ func (s *Server) handlePageDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if err := s.store.IncrementFileDownloads(r.Context(), file.ID); err != nil {
+		s.logger.Warn("increment file downloads", "file_id", s.logID(file.ID), "error", err)
+	}
 	http.Redirect(w, r, url, http.StatusSeeOther)
 }
 

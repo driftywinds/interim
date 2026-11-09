@@ -94,7 +94,8 @@ reload.
 tell whether each download-link request slides the file expiry. `GET
 /api/v1/keys/me` returns the caller's effective `max_file_size_bytes` and
 `retention_seconds`; `0` means unlimited for that hash. File objects include
-`never_expires: true` when the uploader's hash has unlimited retention.
+`never_expires: true` when the uploader's hash has unlimited retention. File
+objects also report `views` (file page opens) and `downloads` (download starts).
 
 Rate limits apply to user-hash creation, upload-intent creation, download-link
 creation, and admin login. Errors use

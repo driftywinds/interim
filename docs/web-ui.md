@@ -37,6 +37,13 @@ The download page never receives or displays the delete token. Its download
 button links to a server endpoint that creates a fresh download link and
 redirects to it. Direct object URLs do not exist in the HTML.
 
+Each file page shows a view counter and a download counter. A view is counted
+when the page is opened for a live (non-expired) file. A download is counted
+when the server issues a download link, which is the last point the app can
+observe before the browser fetches the file directly. Both counters also appear
+in the admin file table and in the public file metadata response. Counts are
+per-request, so refreshes and repeat downloads each add one.
+
 The UI is deliberately minimal: system sans-serif, no webfonts, no logo image,
 native controls, automatic light/dark mode, and monospace filenames.
 

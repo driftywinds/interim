@@ -60,8 +60,9 @@ type FilePageView struct {
 	ExpiresIn         string
 	NeverExpires      bool
 	FileRetentionRule string
+	Views             int64
+	Downloads         int64
 	PageURL           string
-	DownloadTTL       string
 	IsExpired         bool
 }
 

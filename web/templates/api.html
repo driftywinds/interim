@@ -1,6 +1,6 @@
 {{define "page"}}
 <div class="api-docs">
-    <p class="lede">Tools to interact with interim programmatically. Uploads go directly from your client to the signed S3 endpoint; interim only signs and records metadata.</p>
+    <p class="lede">Tools to interact with interim programmatically. Uploads go from your client straight to storage; interim handles authorization, quotas, and the file record.</p>
     {{if not .PublicUploads}}
     <div class="warn" role="note">
         <p class="lede">Uploads on this instance require an approved user hash.</p>
@@ -30,7 +30,7 @@
         <li><code>POST /uploads/{id}/complete</code> verifies the object in storage and creates the public file record.</li>
     </ol>
     <p>If the instance has multipart uploads enabled and the file is above the configured threshold, <code>POST /uploads</code> returns <code>mode: "multipart"</code> instead. The client requests part URLs, uploads each part, reports its ETag, then completes. Parts can be retried individually and resumed from <code>GET /uploads/{id}</code>.</p>
-    <p>A pending upload can be canceled with <code>DELETE /uploads/{id}</code>. Unclaimed intents and their temporary objects are removed by a janitor after the upload window expires.</p>
+    <p>A pending upload can be canceled with <code>DELETE /uploads/{id}</code>. Unclaimed uploads and their temporary objects are removed automatically after the upload window expires.</p>
 
     <h2 id="authentication">Authentication</h2>
     {{if .PublicUploads}}

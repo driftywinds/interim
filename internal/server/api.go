@@ -34,6 +34,8 @@ type fileDTO struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	ExpiresIn    int64     `json:"expires_in_seconds"`
 	NeverExpires bool      `json:"never_expires"`
+	Views        int64     `json:"views"`
+	Downloads    int64     `json:"downloads"`
 	PageURL      string    `json:"page_url"`
 	APIURL       string    `json:"api_url"`
 	Owner        string    `json:"owner"`
@@ -371,6 +373,8 @@ func (s *Server) fileDTO(file store.File) fileDTO {
 		ExpiresAt:    file.ExpiresAt,
 		ExpiresIn:    expiresIn,
 		NeverExpires: neverExpires,
+		Views:        file.Views,
+		Downloads:    file.Downloads,
 		PageURL:      s.pageURL(file.ID),
 		APIURL:       s.apiFileURL(file.ID),
 		Owner:        owner,
@@ -460,6 +464,9 @@ func (s *Server) handleAPIDownload(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("create download link", "file_id", s.logID(file.ID), "error", err)
 		s.writeAPIError(w, r, http.StatusBadGateway, "storage_error", "Could not create a download link.")
 		return
+	}
+	if err := s.store.IncrementFileDownloads(r.Context(), file.ID); err != nil {
+		s.logger.Warn("increment file downloads", "file_id", s.logID(file.ID), "error", err)
 	}
 	s.writeJSON(w, http.StatusOK, downloadDTO{
 		URL:       url,

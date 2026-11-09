@@ -60,7 +60,7 @@
 
 <section id="resume-uploads" class="history" hidden>
     <h2>Interrupted uploads</h2>
-    <p class="muted">Multipart uploads are resumable for a while if interrupted. Select the same file above to continue from where you left off.</p>
+    <p class="muted">Large uploads can be resumed for a while if interrupted. Select the same file above to continue where you left off.</p>
     <ul id="resume-list" class="resume-list"></ul>
 </section>
 
@@ -79,14 +79,14 @@
     </p>
     {{end}}
     <p class="muted" id="storage-detail">
-        <span id="storage-available">{{bytes .Status.Available}}</span> available<span id="storage-reserved">{{if gt .Status.Reserved 0}} · {{bytes .Status.Reserved}} reserved by active uploads{{end}}</span>
+        <span id="storage-available">{{bytes .Status.Available}}</span> available<span id="storage-reserved">{{if gt .Status.Reserved 0}} · {{bytes .Status.Reserved}} in progress{{end}}</span>
     </p>
 </fieldset>
 {{end}}
 
 <section class="history" aria-labelledby="history-title">
     <h2 id="history-title">Your uploads in this browser</h2>
-    <p class="muted">This list lives only in this browser. Delete tokens are stored locally and never shown on the download page.</p>
+    <p class="muted">This list lives only in this browser.</p>
     <table class="fs" id="local-table">
         <thead>
         <tr><th>File</th><th>Size</th><th>Expires</th><th>Actions</th></tr>
@@ -118,6 +118,7 @@
         <li>{{if .Status.PublicUploads}}No account needed{{else}}Uploads limited to approved user hashes{{end}}</li>
         <li>Expiry period of {{.RetentionLabel}}{{if .ExtendRetentionOnDownload}} from the last download{{end}} by default</li>
         <li>{{if .Status.Unlimited}}No global storage cap{{else}}A strict storage cap (Please donate if you want more storage and retention time){{end}}</li>
+        <li>View and download counts for every file</li>
         <li>Basic upload history and deletion</li>
     </ul>
 </section>

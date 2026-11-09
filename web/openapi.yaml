@@ -533,7 +533,7 @@ components:
   schemas:
     File:
       type: object
-      required: [id, name, size, content_type, created_at, expires_at, expires_in_seconds, never_expires, page_url, api_url, owner]
+      required: [id, name, size, content_type, created_at, expires_at, expires_in_seconds, never_expires, views, downloads, page_url, api_url, owner]
       properties:
         id:
           type: string
@@ -557,6 +557,14 @@ components:
         never_expires:
           type: boolean
           description: True when the uploader's user hash has unlimited retention; expires_at is a far-future sentinel.
+        views:
+          type: integer
+          format: int64
+          description: Times the file page has been opened.
+        downloads:
+          type: integer
+          format: int64
+          description: Times a download has been started for this file.
         page_url:
           type: string
           format: uri

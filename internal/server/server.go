@@ -451,6 +451,12 @@ func loadTemplates() (map[string]*template.Template, error) {
 			return s + "…"
 		},
 		"lower": strings.ToLower,
+		"plural": func(n int64, one, many string) string {
+			if n == 1 {
+				return fmt.Sprintf("1 %s", one)
+			}
+			return fmt.Sprintf("%d %s", n, many)
+		},
 	}
 
 	pages := []string{"home", "file", "api", "admin", "auth", "error"}

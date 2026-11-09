@@ -45,6 +45,8 @@ type File struct {
 	OriginalName    string
 	ContentType     string
 	Size            int64
+	Views           int64
+	Downloads       int64
 	DeleteTokenHash []byte
 	CreatedAt       time.Time
 	ExpiresAt       time.Time

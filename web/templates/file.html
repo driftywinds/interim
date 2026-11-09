@@ -19,21 +19,18 @@
         <div class="download-row">
             <a href="/f/{{.ID}}/download" class="download-btn" id="download-button">Download File <span class="size">{{bytes .Size}}</span></a>
             <div class="download-links">
-                <button type="button" class="link-button" data-copy="{{.PageURL}}">Copy download page link</button>
-                <a href="/api#get-file-metadata">API details</a>
+                <button type="button" class="link-button" data-copy="{{.PageURL}}">Copy link</button>
             </div>
         </div>
 
-        <p class="download-note">The download button asks the server for a signed S3 link that expires after {{.DownloadTTL}}. The bucket is private, so the file cannot be hotlinked.</p>
+        <p class="file-stats">{{plural .Views "view" "views"}} · {{plural .Downloads "download" "downloads"}}</p>
 
         <div class="warn">
-            <p class="lede">All downloads happen from this page.</p>
-            <p>There are no direct object URLs and no permanent links. If a link works after {{.DownloadTTL}}, it did not come from us.</p>
+            <p class="lede">A friendly reminder.</p>
             <ul>
-                {{if not .NeverExpires}}<li>The file is deleted automatically {{.FileRetentionRule}}.</li>{{end}}
+                {{if not .NeverExpires}}<li>This file is removed automatically {{.FileRetentionRule}}.</li>{{end}}
                 {{if and .ExtendRetentionOnDownload (not .NeverExpires)}}<li>Each download extends the deadline to {{.RetentionLabel}} from that download.</li>{{end}}
                 <li>If you need it later, download it now.</li>
-                <li>Links are generated per click and expire quickly.</li>
             </ul>
         </div>
     {{end}}

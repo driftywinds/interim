@@ -1482,6 +1482,80 @@ func TestAPIKeyUploadDownloadDelete(t *testing.T) {
 	}
 }
 
+func TestFileViewAndDownloadCounters(t *testing.T) {
+	env := newTestEnv(t, 20<<20, 5<<20)
+	result := env.upload(t, "", "counted.txt", []byte("count me"))
+	if result.Status != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", result.Status, result.Body)
+	}
+
+	file, err := env.store.FileByID(context.Background(), result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Views != 0 || file.Downloads != 0 {
+		t.Fatalf("new file counters = %d / %d", file.Views, file.Downloads)
+	}
+
+	for i := 0; i < 2; i++ {
+		status, body := getBody(t, env.client, env.http.URL+"/f/"+result.ID)
+		if status != http.StatusOK {
+			t.Fatalf("file page status = %d", status)
+		}
+		want := []string{"1 view", "2 views"}[i]
+		if !bytes.Contains([]byte(body), []byte(want)) {
+			t.Fatalf("file page did not show %q: %s", want, body)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		request, _ := http.NewRequest(http.MethodPost, env.http.URL+"/api/v1/files/"+result.ID+"/download", nil)
+		response, err := env.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("API download %d status = %d", i, response.StatusCode)
+		}
+	}
+	response, err := env.client.Get(env.http.URL + "/f/" + result.ID + "/download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("page download status = %d", response.StatusCode)
+	}
+
+	file, err = env.store.FileByID(context.Background(), result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Views != 2 || file.Downloads != 3 {
+		t.Fatalf("counters = views %d downloads %d, want 2 / 3", file.Views, file.Downloads)
+	}
+
+	status, metadata := getBody(t, env.client, env.http.URL+"/api/v1/files/"+result.ID)
+	if status != http.StatusOK || !bytes.Contains([]byte(metadata), []byte(`"views":2`)) || !bytes.Contains([]byte(metadata), []byte(`"downloads":3`)) {
+		t.Fatalf("metadata counters = %d: %s", status, metadata)
+	}
+
+	// An expired page must not count as a view.
+	env.server.now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
+	status, _ = getBody(t, env.client, env.http.URL+"/f/"+result.ID)
+	if status != http.StatusGone {
+		t.Fatalf("expired page status = %d", status)
+	}
+	file, err = env.store.FileByID(context.Background(), result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Views != 2 {
+		t.Fatalf("expired page incremented views to %d", file.Views)
+	}
+}
+
 func TestUploadUsesConfiguredRetention(t *testing.T) {
 	env := newTestEnv(t, 20<<20, 5<<20)
 	env.server.cfg.Retention = 12 * time.Hour
@@ -1667,7 +1741,7 @@ func TestPerKeyFileSizeAndRetentionLimits(t *testing.T) {
 		t.Fatalf("file lifetime = %v, want 1h", lifetime)
 	}
 	status, filePage := getBody(t, env.client, env.http.URL+"/f/"+under.ID)
-	if status != http.StatusOK || !bytes.Contains([]byte(filePage), []byte("deleted automatically after 1 hour")) {
+	if status != http.StatusOK || !bytes.Contains([]byte(filePage), []byte("removed automatically after 1 hour")) {
 		t.Fatalf("per-key retention page = %d", status)
 	}
 
